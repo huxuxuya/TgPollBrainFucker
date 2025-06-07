@@ -676,8 +676,12 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
     # Сортируем варианты по числу голосов (убывание)
     sorted_options = sorted(options, key=lambda o: len(option_voters[o]), reverse=True)
     max_votes = max((len(option_voters[o]) for o in options), default=0)
-    # Список не проголосовавших
-    not_voted = [first_name + (f' {last_name}' if last_name else '') for user_id_part, username, first_name, last_name, response in responses if not response]
+    # Список не проголосовавших (только уникальные user_id)
+    not_voted_dict = {}
+    for user_id_part, username, first_name, last_name, response in responses:
+        if not response and user_id_part not in not_voted_dict:
+            not_voted_dict[user_id_part] = first_name + (f' {last_name}' if last_name else '')
+    not_voted = list(not_voted_dict.values())
     # Формируем красивый HTML-результат
     result_text = f'<b>📊 {poll_message}</b>\n\n<b>Результаты</b> <i>(👥 {len(all_voted_user_ids)})</i>:'
     for idx, opt in enumerate(sorted_options):
