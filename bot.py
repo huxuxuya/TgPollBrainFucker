@@ -21,6 +21,9 @@ except KeyError:
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- Флаг для включения/отключения debug-информации в результатах опроса ---
+ENABLE_DEBUG_INFO = True
+
 # Database setup
 conn = sqlite3.connect('poll_data.db')
 c = conn.cursor()
@@ -579,7 +582,11 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
     c.execute('SELECT p.user_id, p.username, p.first_name, p.last_name, r.response FROM participants p LEFT JOIN responses r ON p.user_id = r.user_id AND r.poll_id = ? WHERE p.chat_id = ? AND p.excluded = 0', (poll_id, chat_id))
     responses = c.fetchall()
     
+    # Подсчет количества проголосовавших
+    voted_count = sum(1 for row in responses if row[4])
+    
     result_text = f'Результаты опроса {poll_id}:\n\n'
+    result_text += f'Всего проголосовало: {voted_count}\n\n'
     result_text += '| Имя              | Ответ          |\n'
     result_text += '|------------------|----------------|\n'
     for user_id_part, username, first_name, last_name, response in responses:
@@ -707,7 +714,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         c.execute('INSERT INTO responses (poll_id, user_id, response) VALUES (?, ?, ?)', (poll_id, user_id, response))
         conn.commit()
         # --- Формируем результаты без дублей ---
-        counts = {opt.strip(): 0 for opt in options}
         names = {opt.strip(): set() for opt in options}  # set для уникальности
         # Получаем все ответы
         sql = 'SELECT r.response, p.first_name, p.last_name, p.user_id FROM responses r JOIN participants p ON r.user_id = p.user_id AND p.chat_id = ? WHERE r.poll_id = ?'
@@ -715,34 +721,31 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         raw_responses = c.fetchall()
         debug_sql = f"SQL: {sql} | params: ({poll_chat_id}, {poll_id}) | rows: {raw_responses}"
         for resp, first_name, last_name, uid in raw_responses:
-            if resp in counts:
-                counts[resp] += 1
+            resp_clean = resp.strip() if resp else ''
+            if resp_clean in names:
                 name = first_name + (f' {last_name}' if last_name else '')
-                names[resp].add((uid, name))  # по user_id
-        # Формируем текст результата
-        result_text = f'{poll_message}\n\nРезультаты:\n'
+                names[resp_clean].add((uid, name))  # по user_id
+        # Подсчет количества проголосовавших (уникальных user_id с ответом)
+        voted_user_ids = set(uid for resp, first_name, last_name, uid in raw_responses if resp)
+        voted_count = len(voted_user_ids)
+        # Формируем результаты без дублей
+        result_text = f'{poll_message}\n\nРезультаты (проголосовало: {voted_count}):\n'
         for opt in options:
             opt_clean = opt.strip()
-            result_text += f'{opt_clean}: {counts[opt_clean]}\n'
-            for _, n in sorted(names[opt_clean]):
+            unique_voters = names[opt_clean]
+            result_text += f'{opt_clean}: {len(unique_voters)}\n'
+            for _, n in sorted(unique_voters):
                 result_text += f'- {n}\n'
-        # --- Отладочная информация ---
-        debug_info = (
-            f'\n[DEBUG]\nPoll ID: {poll_id}\nChat ID: {poll_chat_id}\nMessage ID: {poll_message_id}\nOptions: {options_str}\n' +
-            debug_sql + '\n'
-            f'Ответ пользователя user_id={user_id}: {response}\n'
-        )
+        text_to_send = result_text
         try:
             await context.bot.edit_message_text(
                 chat_id=poll_chat_id,
                 message_id=poll_message_id,
-                text=result_text + debug_info,
+                text=text_to_send,
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(opt.strip(), callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)])
             )
         except Exception as e:
             logger.error(f'Ошибка при обновлении сообщения с опросом: {e}')
-        # Не отправляем 'Ваш ответ записан.'
-        # await context.bot.send_message(chat_id=user_id, text='Ваш ответ записан.')
     elif action.startswith('selectchat_'):
         await select_chat_callback(update, context)
 
