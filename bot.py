@@ -729,20 +729,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         voted_user_ids = set(uid for resp, first_name, last_name, uid in raw_responses if resp)
         voted_count = len(voted_user_ids)
         # Формируем результаты без дублей
-        result_text = f'{poll_message}\n\nРезультаты (проголосовало: {voted_count}):\n'
+        result_text = f'<b>{poll_message}</b>\n\n<b>Результаты</b> <i>(проголосовало: {voted_count})</i>:\n'
         for opt in options:
             opt_clean = opt.strip()
             unique_voters = names[opt_clean]
-            result_text += f'{opt_clean}: {len(unique_voters)}\n'
+            result_text += f'\n<b>• {opt_clean}</b>: <b>{len(unique_voters)}</b>'
             for _, n in sorted(unique_voters):
-                result_text += f'- {n}\n'
+                result_text += f'\n    — {n}'
         text_to_send = result_text
         try:
             await context.bot.edit_message_text(
                 chat_id=poll_chat_id,
                 message_id=poll_message_id,
                 text=text_to_send,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(opt.strip(), callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)])
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(opt.strip(), callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)]),
+                parse_mode='HTML'
             )
         except Exception as e:
             logger.error(f'Ошибка при обновлении сообщения с опросом: {e}')
