@@ -8,6 +8,7 @@ import sqlite3
 import os
 from dotenv import load_dotenv
 from telegram.constants import ParseMode
+from telegram.error import ChatMigrated
 
 # Load environment variables from .env file
 load_dotenv()
@@ -320,18 +321,21 @@ async def exclude(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     c.execute('SELECT user_id, username, first_name, last_name, excluded FROM participants WHERE chat_id = ?', (chat_id,))
     participants = c.fetchall()
+    # Убираем дубли по user_id
+    unique_participants = {}
+    for user_id_part, username, first_name, last_name, excluded in participants:
+        if user_id_part not in unique_participants:
+            unique_participants[user_id_part] = (username, first_name, last_name, excluded)
     if not participants:
         await context.bot.send_message(chat_id=user_id, text='Список участников пуст. Используйте /collect для сбора участников.')
         return
-    
-    keyboard = []
-    for user_id_part, username, first_name, last_name, excluded in participants:
+    text = '<b>Список участников группы:</b>\n'
+    for user_id_part, (username, first_name, last_name, excluded) in unique_participants.items():
         name = first_name + (f' {last_name}' if last_name else '')
         display_name = f'{name} (@{username})' if username else name
         status = ' (исключен)' if excluded else ''
-        keyboard.append([InlineKeyboardButton(f'{display_name}{status}', callback_data=f'exclude_{user_id_part}_{chat_id}')])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=user_id, text='Выберите участника для исключения/включения:', reply_markup=reply_markup)
+        text += f'- {display_name}{status}\n'
+    await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
 
 async def exclude_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_user_to_participants(update)
@@ -376,14 +380,29 @@ async def newpoll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
             await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
             return
-    cursor = c.execute('INSERT INTO polls (chat_id, message, status, options) VALUES (?, ?, ?, ?)', (chat_id, '', 'draft', 'Перевел,Позже,Не участвую'))
-    poll_id = cursor.lastrowid
-    conn.commit()
-    logger.info(f'[NEWPOLL] Создан новый опрос: poll_id={poll_id}, chat_id={chat_id}')
-    # Удаляем все старые черновики кроме только что созданного
-    c.execute('DELETE FROM polls WHERE chat_id = ? AND status = ? AND poll_id != ?', (chat_id, 'draft', poll_id))
-    conn.commit()
-    await context.bot.send_message(chat_id=user_id, text=f'Создан новый опрос с ID {poll_id}. Используйте /setmessage и /setoptions для настройки.')
+    try:
+        cursor = c.execute('INSERT INTO polls (chat_id, message, status, options) VALUES (?, ?, ?, ?)', (chat_id, '', 'draft', 'Перевел,Позже,Не участвую'))
+        poll_id = cursor.lastrowid
+        conn.commit()
+        logger.info(f'[NEWPOLL] Создан новый опрос: poll_id={poll_id}, chat_id={chat_id}')
+        # Удаляем все старые черновики кроме только что созданного
+        c.execute('DELETE FROM polls WHERE chat_id = ? AND status = ? AND poll_id != ?', (chat_id, 'draft', poll_id))
+        conn.commit()
+        await context.bot.send_message(chat_id=user_id, text=f'Создан новый опрос с ID {poll_id}. Используйте /setmessage и /setoptions для настройки.')
+    except ChatMigrated as e:
+        new_chat_id = e.new_chat_id
+        # Обновить chat_id во всех таблицах
+        c.execute('UPDATE polls SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
+        c.execute('UPDATE participants SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
+        c.execute('UPDATE known_chats SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
+        conn.commit()
+        logger.info(f'[NEWPOLL] ChatMigrated: обновил chat_id {chat_id} -> {new_chat_id}, повторяю создание опроса')
+        # Повторяем попытку с новым chat_id
+        cursor = c.execute('INSERT INTO polls (chat_id, message, status, options) VALUES (?, ?, ?, ?)', (new_chat_id, '', 'draft', 'Перевел,Позже,Не участвую'))
+        poll_id = cursor.lastrowid
+        conn.commit()
+        context.user_data['selected_chat_id'] = new_chat_id
+        await context.bot.send_message(chat_id=user_id, text=f'Группа была преобразована в супергруппу, chat_id обновлён. Создан новый опрос с ID {poll_id}. Используйте /setmessage и /setoptions для настройки.')
 
 async def mychats(update: Update, context: ContextTypes.DEFAULT_TYPE, force_user_id=None):
     c.execute('SELECT chat_id, title FROM known_chats')
@@ -685,6 +704,7 @@ def get_admin_keyboard(is_admin):
             [InlineKeyboardButton('Установить варианты ответа', callback_data='setoptions')],
             [InlineKeyboardButton('Запустить опрос', callback_data='startpoll')],
             [InlineKeyboardButton('Результаты', callback_data='results')],
+            [InlineKeyboardButton('Список участников', callback_data='participants')],
             [InlineKeyboardButton('Список групп', callback_data='mychats')]
         ]
     else:
@@ -899,6 +919,68 @@ def get_effective_chat_id(update, context):
     else:
         return update.effective_chat.id
 
+# --- Обработчик кнопки "Список участников" ---
+async def participants_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    add_user_to_participants(update)
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    # Получаем все известные группы
+    c.execute('SELECT DISTINCT chat_id FROM polls')
+    chat_ids = [row[0] for row in c.fetchall()]
+    if not chat_ids:
+        await query.edit_message_text('Бот не знает ни одной группы. Добавьте его в группу и напишите в ней что-нибудь.')
+        return
+    text = ''
+    for gid in chat_ids:
+        c.execute('SELECT title FROM known_chats WHERE chat_id = ?', (gid,))
+        row = c.fetchone()
+        title = row[0] if row else str(gid)
+        text += f'<b>Группа:</b> {title} (ID: {gid})\n'
+        c.execute('SELECT user_id, username, first_name, last_name, excluded FROM participants WHERE chat_id = ?', (gid,))
+        participants = c.fetchall()
+        # Убираем дубли по user_id
+        unique_participants = {}
+        for user_id_part, username, first_name, last_name, excluded in participants:
+            if user_id_part not in unique_participants:
+                unique_participants[user_id_part] = (username, first_name, last_name, excluded)
+        if not unique_participants:
+            text += '  — <i>Список участников пуст</i>\n'
+        else:
+            for user_id_part, (username, first_name, last_name, excluded) in unique_participants.items():
+                name = first_name + (f' {last_name}' if last_name else '')
+                display_name = f'{name} (@{username})' if username else name
+                status = ' (исключен)' if excluded else ''
+                text += f'  — {display_name}{status}\n'
+        text += '\n'
+    await query.edit_message_text(text, parse_mode='HTML')
+
+# Добавляю обработчик для participantschat_
+async def participantschat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    add_user_to_participants(update)
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    chat_id = int(query.data.split('_')[1])
+    context.user_data['selected_chat_id'] = chat_id
+    c.execute('SELECT user_id, username, first_name, last_name, excluded FROM participants WHERE chat_id = ?', (chat_id,))
+    participants = c.fetchall()
+    # Убираем дубли по user_id
+    unique_participants = {}
+    for user_id_part, username, first_name, last_name, excluded in participants:
+        if user_id_part not in unique_participants:
+            unique_participants[user_id_part] = (username, first_name, last_name, excluded)
+    if not participants:
+        await query.edit_message_text('Список участников пуст. Используйте /collect для сбора участников.')
+        return
+    text = '<b>Список участников группы:</b>\n'
+    for user_id_part, (username, first_name, last_name, excluded) in unique_participants.items():
+        name = first_name + (f' {last_name}' if last_name else '')
+        display_name = f'{name} (@{username})' if username else name
+        status = ' (исключен)' if excluded else ''
+        text += f'- {display_name}{status}\n'
+    await query.edit_message_text(text, parse_mode='HTML')
+
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -922,6 +1004,8 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_user))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_dialog_handler))
     application.add_handler(CallbackQueryHandler(refresh_results_callback, pattern='^refreshresults_'))
+    application.add_handler(CallbackQueryHandler(participants_callback, pattern='^participants$'))
+    application.add_handler(CallbackQueryHandler(participantschat_callback, pattern='^participantschat_'))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
