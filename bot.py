@@ -7,6 +7,7 @@ from typing import Union
 import sqlite3
 import os
 from dotenv import load_dotenv
+from telegram.constants import ParseMode
 
 # Load environment variables from .env file
 load_dotenv()
@@ -566,7 +567,7 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
     add_user_to_participants(update)
     
     # Получаем ID чата из опроса, чтобы корректно найти участников
-    c.execute("SELECT chat_id FROM polls WHERE poll_id = ?", (poll_id,))
+    c.execute("SELECT chat_id, message_id FROM polls WHERE poll_id = ?", (poll_id,))
     res = c.fetchone()
     if not res:
         if user_id:
@@ -574,7 +575,7 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
         elif update.effective_message:
             await update.effective_message.reply_text(f"Опрос с ID {poll_id} не найден.")
         return
-    chat_id = res[0]
+    chat_id, poll_message_id = res
 
     if user_id is None:
         user_id = update.effective_user.id
@@ -585,16 +586,41 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
     # Подсчет количества проголосовавших
     voted_count = sum(1 for row in responses if row[4])
     
-    result_text = f'Результаты опроса {poll_id}:\n\n'
-    result_text += f'Всего проголосовало: {voted_count}\n\n'
-    result_text += '| Имя              | Ответ          |\n'
-    result_text += '|------------------|----------------|\n'
+    c.execute('SELECT options, message FROM polls WHERE poll_id = ?', (poll_id,))
+    poll_row = c.fetchone()
+    if poll_row:
+        options_str, poll_message = poll_row
+        options = [opt.strip() for opt in options_str.split(',')]
+    else:
+        poll_message = f'Опрос {poll_id}'
+        options = []
+    # Собираем по вариантам: user_id, имя
+    option_voters = {opt: set() for opt in options}
+    all_voted_user_ids = set()
     for user_id_part, username, first_name, last_name, response in responses:
-        name = first_name + (f' {last_name}' if last_name else '')
-        response_text = response if response else 'Нет ответа'
-        result_text += f'| {name:<16} | {response_text:<14} |\n'
-    
-    await context.bot.send_message(chat_id=user_id, text=result_text)
+        if response:
+            name = first_name + (f' {last_name}' if last_name else '')
+            option_voters[response].add((user_id_part, name))
+            all_voted_user_ids.add(user_id_part)
+    # Сортируем варианты по числу голосов (убывание)
+    sorted_options = sorted(options, key=lambda o: len(option_voters[o]), reverse=True)
+    max_votes = max((len(option_voters[o]) for o in options), default=0)
+    # Список не проголосовавших
+    not_voted = [first_name + (f' {last_name}' if last_name else '') for user_id_part, username, first_name, last_name, response in responses if not response]
+    # Формируем красивый HTML-результат
+    result_text = f'<b>📊 {poll_message}</b>\n\n<b>Результаты</b> <i>(👥 {len(all_voted_user_ids)})</i>:'
+    for idx, opt in enumerate(sorted_options):
+        votes = len(option_voters[opt])
+        result_text += f'\n<b>• {opt}</b>: <b>{votes}</b>'
+        for _, n in sorted(option_voters[opt]):
+            result_text += f'\n    — {n}'
+    if not_voted:
+        result_text += '\n\n<b>Не проголосовали:</b>\n'
+        for n in not_voted:
+            result_text += f'— {n}\n'
+    # Кнопка обновления результатов
+    keyboard = [[InlineKeyboardButton('🔄 Обновить результаты в группе', callback_data=f'refreshresults_{poll_id}')]]
+    await context.bot.send_message(chat_id=user_id, text=result_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def results_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_user_to_participants(update)
@@ -602,6 +628,50 @@ async def results_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await query.answer()
     poll_id = int(query.data.split('_')[1])
     await show_results(update, context, poll_id, query.from_user.id)
+
+# --- Обработчик кнопки обновления результатов в группе ---
+async def refresh_results_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    poll_id = int(query.data.split('_')[1])
+    # Получаем chat_id и старый message_id
+    c.execute('SELECT chat_id, message_id, options, message FROM polls WHERE poll_id = ?', (poll_id,))
+    row = c.fetchone()
+    if not row:
+        await query.edit_message_text('Опрос не найден.')
+        return
+    chat_id, old_message_id, options_str, poll_message = row
+    # Удаляем старое сообщение с результатами
+    if old_message_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=old_message_id)
+        except Exception as e:
+            pass  # Может быть уже удалено
+    # Формируем новое сообщение с результатами
+    c.execute('SELECT p.user_id, p.username, p.first_name, p.last_name, r.response FROM participants p LEFT JOIN responses r ON p.user_id = r.user_id AND r.poll_id = ? WHERE p.chat_id = ? AND p.excluded = 0', (poll_id, chat_id))
+    responses = c.fetchall()
+    options = [opt.strip() for opt in options_str.split(',')]
+    option_voters = {opt: set() for opt in options}
+    all_voted_user_ids = set()
+    for user_id_part, username, first_name, last_name, response in responses:
+        if response:
+            name = first_name + (f' {last_name}' if last_name else '')
+            option_voters[response].add((user_id_part, name))
+            all_voted_user_ids.add(user_id_part)
+    sorted_options = sorted(options, key=lambda o: len(option_voters[o]), reverse=True)
+    result_text = f'<b>📊 {poll_message}</b>\n\n<b>Результаты</b> <i>(👥 {len(all_voted_user_ids)})</i>:'
+    for idx, opt in enumerate(sorted_options):
+        votes = len(option_voters[opt])
+        result_text += f'\n<b>• {opt}</b>: <b>{votes}</b>'
+        for _, n in sorted(option_voters[opt]):
+            result_text += f'\n    — {n}'
+    # Отправляем новое сообщение в группу (тихо) с кнопками голосования
+    poll_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(opt, callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)])
+    new_msg = await context.bot.send_message(chat_id=chat_id, text=result_text, parse_mode='HTML', disable_notification=True, reply_markup=poll_keyboard)
+    # Сохраняем новый message_id
+    c.execute('UPDATE polls SET message_id = ? WHERE poll_id = ?', (new_msg.message_id, poll_id))
+    conn.commit()
+    await query.edit_message_text('Результаты обновлены в группе!')
 
 # --- ДОБАВЛЕНО: обновить меню с кнопкой "Список групп" ---
 def get_admin_keyboard(is_admin):
@@ -846,11 +916,12 @@ def main() -> None:
     application.add_handler(CommandHandler('mychats', mychats))
     application.add_handler(CommandHandler('cleangroup', cleangroup))
     application.add_handler(CallbackQueryHandler(exclude_callback, pattern='^exclude_'))
-    application.add_handler(CallbackQueryHandler(button_callback, pattern='^(help|collect|exclude|newpoll|startpoll|results|setmessage|setoptions|mychats|poll_|selectchat_)'))
     application.add_handler(CallbackQueryHandler(results_callback, pattern='^results_'))
+    application.add_handler(CallbackQueryHandler(button_callback, pattern='^(help|collect|exclude|newpoll|startpoll|results|setmessage|setoptions|mychats|poll_|selectchat_)'))
     # --- ДОБАВЛЕНО: handler для любых сообщений в группах ---
     application.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_user))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_dialog_handler))
+    application.add_handler(CallbackQueryHandler(refresh_results_callback, pattern='^refreshresults_'))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
