@@ -139,6 +139,24 @@ async def select_chat_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await context.bot.send_message(chat_id=query.from_user.id, text='Пожалуйста, отправьте варианты ответа через запятую одним сообщением.')
         await query.message.delete()
         return
+    # Если выбрана команда newpoll, сразу создаём черновик опроса и сообщаем об этом
+    if command == 'newpoll':
+        # Создаём черновик опроса
+        user_id = query.from_user.id
+        try:
+            cursor = c.execute('INSERT INTO polls (chat_id, message, status, options) VALUES (?, ?, ?, ?)', (int(chat_id), '', 'draft', 'Перевел,Позже,Не участвую'))
+            poll_id = cursor.lastrowid
+            conn.commit()
+            logger.info(f'[NEWPOLL] Создан новый опрос: poll_id={poll_id}, chat_id={chat_id}')
+            # Удаляем все старые черновики кроме только что созданного
+            c.execute('DELETE FROM polls WHERE chat_id = ? AND status = ? AND poll_id != ?', (int(chat_id), 'draft', poll_id))
+            conn.commit()
+            await context.bot.send_message(chat_id=user_id, text=f'Создан новый опрос с ID {poll_id}. Используйте /setmessage и /setoptions для настройки.')
+        except Exception as e:
+            logger.error(f'[NEWPOLL] Ошибка при создании опроса: {e}')
+            await context.bot.send_message(chat_id=user_id, text=f'Ошибка при создании опроса: {e}')
+        await query.message.delete()
+        return
     await execute_command(update, context, command)
     await query.message.delete()
 
@@ -365,44 +383,44 @@ async def exclude_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def newpoll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_user_to_participants(update)
-    chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    if chat_id < 0:  # Group chat
-        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-            await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-            return
-        context.user_data['selected_chat_id'] = chat_id
-    else:  # Private chat
-        if 'selected_chat_id' not in context.user_data:
-            await select_chat(update, context, 'newpoll')
-            return
-        chat_id = context.user_data['selected_chat_id']
-        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-            await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-            return
-    try:
-        cursor = c.execute('INSERT INTO polls (chat_id, message, status, options) VALUES (?, ?, ?, ?)', (chat_id, '', 'draft', 'Перевел,Позже,Не участвую'))
-        poll_id = cursor.lastrowid
-        conn.commit()
-        logger.info(f'[NEWPOLL] Создан новый опрос: poll_id={poll_id}, chat_id={chat_id}')
-        # Удаляем все старые черновики кроме только что созданного
-        c.execute('DELETE FROM polls WHERE chat_id = ? AND status = ? AND poll_id != ?', (chat_id, 'draft', poll_id))
-        conn.commit()
-        await context.bot.send_message(chat_id=user_id, text=f'Создан новый опрос с ID {poll_id}. Используйте /setmessage и /setoptions для настройки.')
-    except ChatMigrated as e:
-        new_chat_id = e.new_chat_id
-        # Обновить chat_id во всех таблицах
-        c.execute('UPDATE polls SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
-        c.execute('UPDATE participants SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
-        c.execute('UPDATE known_chats SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
-        conn.commit()
-        logger.info(f'[NEWPOLL] ChatMigrated: обновил chat_id {chat_id} -> {new_chat_id}, повторяю создание опроса')
-        # Повторяем попытку с новым chat_id
-        cursor = c.execute('INSERT INTO polls (chat_id, message, status, options) VALUES (?, ?, ?, ?)', (new_chat_id, '', 'draft', 'Перевел,Позже,Не участвую'))
-        poll_id = cursor.lastrowid
-        conn.commit()
-        context.user_data['selected_chat_id'] = new_chat_id
-        await context.bot.send_message(chat_id=user_id, text=f'Группа была преобразована в супергруппу, chat_id обновлён. Создан новый опрос с ID {poll_id}. Используйте /setmessage и /setoptions для настройки.')
+    # ВСЕГДА предлагаем выбрать группу, даже если она одна
+    c.execute('SELECT DISTINCT chat_id, title FROM known_chats')
+    known_chats = c.fetchall()
+    admin_chats = []
+    for chat_id, title in known_chats:
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+            if user_id in [admin.user.id for admin in admins]:
+                admin_chats.append(type('Chat', (), {'id': chat_id, 'title': title, 'type': 'group'}))
+        except ChatMigrated as e:
+            new_chat_id = e.new_chat_id
+            # Обновить chat_id во всех таблицах
+            c.execute('UPDATE polls SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
+            c.execute('UPDATE participants SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
+            # --- fix known_chats UNIQUE constraint ---
+            c.execute('SELECT title FROM known_chats WHERE chat_id = ?', (chat_id,))
+            row = c.fetchone()
+            title_val = row[0] if row else None
+            c.execute('DELETE FROM known_chats WHERE chat_id = ?', (chat_id,))
+            if title_val is not None:
+                c.execute('INSERT OR IGNORE INTO known_chats (chat_id, title) VALUES (?, ?)', (new_chat_id, title_val))
+            conn.commit()
+            try:
+                admins = await context.bot.get_chat_administrators(new_chat_id)
+                if user_id in [admin.user.id for admin in admins]:
+                    admin_chats.append(type('Chat', (), {'id': new_chat_id, 'title': title, 'type': 'group'}))
+            except Exception as e2:
+                logger.error(f'Error checking admin status in migrated chat {new_chat_id}: {e2}')
+        except Exception as e:
+            logger.error(f'Error checking admin status in known chat {chat_id}: {e}')
+    if len(admin_chats) == 0:
+        await context.bot.send_message(chat_id=user_id, text='Я не знаю ни одной группы, где вы администратор. Пожалуйста, выполните любую команду в группе, чтобы я её узнал.')
+        return
+    keyboard = [[InlineKeyboardButton(chat.title, callback_data=f'selectchat_{chat.id}_newpoll')] for chat in admin_chats]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await context.bot.send_message(chat_id=user_id, text='Выберите группу для создания опроса:', reply_markup=reply_markup)
+    return
 
 async def mychats(update: Update, context: ContextTypes.DEFAULT_TYPE, force_user_id=None):
     c.execute('SELECT chat_id, title FROM known_chats')
@@ -410,29 +428,63 @@ async def mychats(update: Update, context: ContextTypes.DEFAULT_TYPE, force_user
     user_id = force_user_id if force_user_id else (update.effective_user.id if update.effective_user else None)
     if not chats:
         text = 'Бот пока не знает ни одной группы. Добавьте его в группу и напишите в ней что-нибудь.'
-    else:
-        # Проверим, где пользователь админ
-        admin_chats = []
-        for chat_id, title in chats:
-            try:
-                admins = await context.bot.get_chat_administrators(chat_id)
-                if user_id in [admin.user.id for admin in admins]:
-                    admin_chats.append((chat_id, title))
-            except Exception as e:
-                logger.error(f'Error checking admin status in chat {chat_id}: {e}')
-        if not admin_chats:
-            text = 'Вы не являетесь администратором ни в одной из известных боту групп. Если вы уверены, что это не так, попробуйте написать что-нибудь в нужной группе, чтобы бот ее увидел.'
+        if force_user_id:
+            await context.bot.send_message(chat_id=force_user_id, text=text)
         else:
-            text = 'Группы, где вы администратор и бот был активен:\n'
-            for chat_id, title in admin_chats:
-                text += f'- {title} (ID: {chat_id})\n'
+            if update.message:
+                await update.message.reply_text(text)
+            elif update.callback_query:
+                await update.callback_query.message.reply_text(text)
+        return
+    # Проверим, где пользователь админ
+    admin_chats = []
+    for chat_id, title in chats:
+        try:
+            admins = await context.bot.get_chat_administrators(chat_id)
+            if user_id in [admin.user.id for admin in admins]:
+                admin_chats.append((chat_id, title))
+        except ChatMigrated as e:
+            new_chat_id = e.new_chat_id
+            c.execute('UPDATE polls SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
+            c.execute('UPDATE participants SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
+            # --- fix known_chats UNIQUE constraint ---
+            c.execute('SELECT title FROM known_chats WHERE chat_id = ?', (chat_id,))
+            row = c.fetchone()
+            title_val = row[0] if row else None
+            c.execute('DELETE FROM known_chats WHERE chat_id = ?', (chat_id,))
+            if title_val is not None:
+                c.execute('INSERT OR IGNORE INTO known_chats (chat_id, title) VALUES (?, ?)', (new_chat_id, title_val))
+            conn.commit()
+            try:
+                admins = await context.bot.get_chat_administrators(new_chat_id)
+                if user_id in [admin.user.id for admin in admins]:
+                    admin_chats.append((new_chat_id, title))
+            except Exception as e2:
+                logger.error(f'Error checking admin status in migrated chat {new_chat_id}: {e2}')
+        except Exception as e:
+            logger.error(f'Error checking admin status in chat {chat_id}: {e}')
+    if not admin_chats:
+        text = 'Вы не являетесь администратором ни в одной из известных боту групп. Если вы уверены, что это не так, попробуйте написать что-нибудь в нужной группе, чтобы бот ее увидел.'
+        if force_user_id:
+            await context.bot.send_message(chat_id=force_user_id, text=text)
+        else:
+            if update.message:
+                await update.message.reply_text(text)
+            elif update.callback_query:
+                await update.callback_query.message.reply_text(text)
+        return
+    # ВСЕГДА показываем меню выбора группы
+    keyboard = [[InlineKeyboardButton(title, callback_data=f'selectchat_{chat_id}_mychats')] for chat_id, title in admin_chats]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    text = 'Группы, где вы администратор и бот был активен:'
     if force_user_id:
-        await context.bot.send_message(chat_id=force_user_id, text=text)
+        await context.bot.send_message(chat_id=force_user_id, text=text, reply_markup=reply_markup)
     else:
         if update.message:
-            await update.message.reply_text(text)
+            await update.message.reply_text(text, reply_markup=reply_markup)
         elif update.callback_query:
-            await update.callback_query.message.reply_text(text)
+            await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
+    return
 
 async def setmessage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_user_to_participants(update)
