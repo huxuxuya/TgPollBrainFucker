@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Gemini was here
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, ReplyKeyboardRemove, ForceReply
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from typing import Union
 import sqlite3
@@ -1206,6 +1206,7 @@ async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Callback для изменения настроек варианта ---
 async def setresultoptions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f'[SETRESULTOPTIONS] setresultoptions_callback CALLED!')
     query = update.callback_query
     await query.answer()
     data = query.data.split('_')
@@ -1213,23 +1214,21 @@ async def setresultoptions_callback(update: Update, context: ContextTypes.DEFAUL
     if len(data) >= 5 and data[3] == 'setemoji':
         poll_id = int(data[1])
         option_index = int(data[2])
-        context.user_data['setemoji_poll_id'] = poll_id
-        context.user_data['setemoji_option_index'] = option_index
         user_id = update.effective_user.id
-        logger.info(f'[SETRESULTOPTIONS] setemoji: отправляю запрос на смайлик в личку user_id={user_id}, chat_type={update.effective_chat.type}')
-        if update.effective_chat.type == 'private':
-            try:
-                await context.bot.send_message(chat_id=user_id, text='Пожалуйста, отправьте смайлик (эмодзи), который будет выводиться перед каждым участником для этого варианта.')
-                logger.info(f'[SETRESULTOPTIONS] setemoji: сообщение успешно отправлено user_id={user_id}')
-            except Exception as e:
-                logger.error(f'[SETRESULTOPTIONS] setemoji: ошибка при отправке сообщения user_id={user_id}: {e}')
-        else:
-            await query.edit_message_text('Ожидаю смайлик...')
-            try:
-                await context.bot.send_message(chat_id=user_id, text='Пожалуйста, отправьте смайлик (эмодзи), который будет выводиться перед каждым участником для этого варианта.')
-                logger.info(f'[SETRESULTOPTIONS] setemoji: сообщение успешно отправлено user_id={user_id}')
-            except Exception as e:
-                logger.error(f'[SETRESULTOPTIONS] setemoji: ошибка при отправке сообщения user_id={user_id}: {e}')
+        if user_id not in context.application.user_data:
+            context.application.user_data[user_id] = {}
+        app_user_data = context.application.user_data[user_id]
+        app_user_data['setemoji_poll_id'] = poll_id
+        app_user_data['setemoji_option_index'] = option_index
+        app_user_data['waiting_for_emoji'] = True
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text='Пожалуйста, отправьте смайлик (эмодзи), который будет выводиться перед каждым участником для этого варианта.'
+            )
+            logger.info(f'[SETRESULTOPTIONS] setemoji: сообщение успешно отправлено user_id={user_id}')
+        except Exception as e:
+            logger.error(f'[SETRESULTOPTIONS] setemoji: ошибка при отправке сообщения user_id={user_id}: {e}')
         return
     if len(data) < 5:
         return
@@ -1282,9 +1281,19 @@ async def setresultoptionspoll_callback(update: Update, context: ContextTypes.DE
 # --- Обработчик текстового сообщения для установки эмодзи ---
 async def setemoji_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f'[SETRESULTOPTIONS] setemoji_message_handler: from user_id={update.effective_user.id}, text={update.message.text}')
-    if 'setemoji_poll_id' in context.user_data and 'setemoji_option_index' in context.user_data:
-        poll_id = context.user_data.pop('setemoji_poll_id')
-        option_index = context.user_data.pop('setemoji_option_index')
+    user_id = update.effective_user.id
+    if user_id not in context.application.user_data:
+        context.application.user_data[user_id] = {}
+    app_user_data = context.application.user_data[user_id]
+    logger.info(f'[SETRESULTOPTIONS] setemoji_message_handler: app_user_data={app_user_data}')
+    if (
+        app_user_data.get('waiting_for_emoji') and
+        'setemoji_poll_id' in app_user_data and
+        'setemoji_option_index' in app_user_data
+    ):
+        poll_id = app_user_data.pop('setemoji_poll_id')
+        option_index = app_user_data.pop('setemoji_option_index')
+        app_user_data.pop('waiting_for_emoji', None)
         emoji = update.message.text.strip()
         logger.info(f'[SETRESULTOPTIONS] setemoji_message_handler: попытка сохранить emoji для poll_id={poll_id}, option_index={option_index}, user_id={update.effective_user.id}, emoji={emoji}')
         try:
@@ -1324,6 +1333,7 @@ def main() -> None:
     application.add_handler(CommandHandler('cleangroup', cleangroup))
     application.add_handler(CallbackQueryHandler(exclude_callback, pattern='^exclude_'))
     application.add_handler(CallbackQueryHandler(results_callback, pattern='^results_'))
+    application.add_handler(CallbackQueryHandler(setresultoptions_callback, pattern='^setresultoptions_'))
     application.add_handler(CallbackQueryHandler(button_callback, pattern='^(help|collect|exclude|newpoll|startpoll|results|setmessage|setoptions|mychats|poll_.*|selectchat_.*|setresultoptions)$'))
     # --- ДОБАВЛЕНО: handler для любых сообщений в группах ---
     application.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_user))
@@ -1333,7 +1343,6 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(participants_callback, pattern='^participants$'))
     application.add_handler(CallbackQueryHandler(participantschat_callback, pattern='^participantschat_'))
     application.add_handler(CommandHandler('setresultoptions', setresultoptions))
-    application.add_handler(CallbackQueryHandler(setresultoptions_callback, pattern='^setresultoptions_'))
     application.add_handler(CallbackQueryHandler(setresultoptionspoll_callback, pattern='^setresultoptionspoll_'))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
