@@ -682,13 +682,14 @@ def get_progress_bar_text(poll_id: int, options: list, option_voters: dict) -> s
         return ''
     return progress_bar_text
 
-def _generate_results_text_and_options(poll_id: int, include_non_voters: bool) -> (str, list):
+def _generate_results_text_and_options(poll_id: int, include_non_voters: bool, detailed_names: bool) -> (str, list):
     """
     Generates the complete, formatted text for poll results and the list of options.
     Handles orphaned responses to prevent KeyErrors.
     
     :param poll_id: The ID of the poll.
     :param include_non_voters: If True, a list of non-voters will be appended.
+    :param detailed_names: If True, includes usernames in the voter lists.
     :return: A tuple of (formatted_result_text, options_list).
     """
     
@@ -726,6 +727,14 @@ def _generate_results_text_and_options(poll_id: int, include_non_voters: bool) -
     c.execute('SELECT default_show_names, default_names_style, default_show_count FROM poll_settings WHERE poll_id = ?', (poll_id,))
     default_settings = c.fetchone() or (1, 'list', 1)
     
+    # --- Fetch all option settings for sorting ---
+    option_settings_map = {}
+    for i, opt in enumerate(options):
+        c.execute('SELECT is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, i))
+        opt_settings = c.fetchone()
+        is_priority = opt_settings[0] if opt_settings and opt_settings[0] is not None else 0
+        option_settings_map[opt] = {'is_priority': is_priority}
+        
     # --- Generate progress bar ---
     progress_bar_text = get_progress_bar_text(poll_id, options, option_voters)
 
@@ -737,7 +746,15 @@ def _generate_results_text_and_options(poll_id: int, include_non_voters: bool) -
         result_text += progress_bar_text
 
     # --- Sort options and add voter lists ---
-    sorted_options = sorted(options, key=lambda o: len(option_voters.get(o, set())), reverse=True)
+    # ИЗМЕНЕНО: Сортировка по приоритету, затем по количеству голосов
+    sorted_options = sorted(
+        options, 
+        key=lambda o: (
+            option_settings_map.get(o, {}).get('is_priority', 0), 
+            len(option_voters.get(o, set()))
+        ), 
+        reverse=True
+    )
     
     for opt in sorted_options:
         original_index = options.index(opt)
@@ -759,21 +776,29 @@ def _generate_results_text_and_options(poll_id: int, include_non_voters: bool) -
         # List of voters
         if show_names and voters:
             sorted_voters = sorted(list(voters), key=lambda x: x[1])
+
+            if detailed_names:
+                voter_names = [f'{emoji} {n}{f" (@{u})" if u else ""}' if emoji else f'{n}{f" (@{u})" if u else ""}' for _, n, u in sorted_voters]
+            else:
+                voter_names = [f'{emoji} {n}' if emoji else f'{n}' for _, n, u in sorted_voters]
+
             if names_style == 'inline':
-                names_str = ', '.join(f'{emoji} {n}{f" (@{u})" if u else ""}' if emoji else f'{n}{f" (@{u})" if u else ""}' for _, n, u in sorted_voters)
-                result_text += f' — {names_str}'
+                result_text += f' — {", ".join(voter_names)}'
             elif names_style == 'small':
-                for _, n, u in sorted_voters:
-                    result_text += f'\n    <i>{f"{emoji} {n}" if emoji else f"{n}"}{f" (@{u})" if u else ""}</i>'
+                for name_str in voter_names:
+                    result_text += f'\n    <i>{name_str}</i>'
             else:  # list
-                for _, n, u in sorted_voters:
-                    result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}{f" (@{u})" if u else ""}'
+                for name_str in voter_names:
+                    result_text += f'\n    {name_str}'
 
     # --- Add list of non-voters ---
     if include_non_voters and not_voted_dict:
         result_text += '\n\n<b>Не проголосовали:</b>'
         sorted_not_voted = sorted(list(not_voted_dict.values()), key=lambda x: x[0])
-        names_list = [f'{n}{f" (@{u})" if u else ""}' for n, u in sorted_not_voted]
+        if detailed_names:
+            names_list = [f'{n}{f" (@{u})" if u else ""}' for n, u in sorted_not_voted]
+        else:
+            names_list = [f'{n}' for n, u in sorted_not_voted]
         result_text += '\n' + '\n'.join(names_list)
         
     return result_text, options
@@ -784,7 +809,7 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
     if user_id is None:
         user_id = update.effective_user.id
         
-    result_text, _ = _generate_results_text_and_options(poll_id, include_non_voters=True)
+    result_text, _ = _generate_results_text_and_options(poll_id, include_non_voters=True, detailed_names=True)
 
     if not result_text:
         if user_id:
@@ -810,7 +835,7 @@ async def results_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     chat_id, old_message_id = row
 
-    result_text, options = _generate_results_text_and_options(poll_id, include_non_voters=False)
+    result_text, options = _generate_results_text_and_options(poll_id, include_non_voters=False, detailed_names=False)
 
     if not result_text:
         await query.edit_message_text(f'Не удалось сформировать результаты для опроса {poll_id}.')
@@ -1042,7 +1067,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         conn.commit()
         
         # --- ИЗМЕНЕНО: Используем новую функцию для генерации текста ---
-        text_to_send, new_options = _generate_results_text_and_options(int(poll_id), include_non_voters=False)
+        text_to_send, new_options = _generate_results_text_and_options(int(poll_id), include_non_voters=False, detailed_names=False)
         
         if not text_to_send:
             logger.error(f"Failed to generate poll results for poll {poll_id} after a vote.")
