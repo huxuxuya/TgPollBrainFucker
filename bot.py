@@ -1592,6 +1592,38 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await message_dialog_handler(update, context)
         return
 
+async def results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    add_user_to_participants(update)
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    if chat_id < 0:  # Group chat
+        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
+            await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
+            return
+        context.user_data['selected_chat_id'] = chat_id
+    else:  # Private chat
+        if 'selected_chat_id' not in context.user_data:
+            await select_chat(update, context, 'results')
+            return
+        chat_id = context.user_data['selected_chat_id']
+        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
+            await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
+            return
+    
+    c.execute('SELECT poll_id, message FROM polls WHERE chat_id = ? AND status = ?', (chat_id, 'active'))
+    active_polls = c.fetchall()
+    if not active_polls:
+        await context.bot.send_message(chat_id=user_id, text='Нет активных опросов.')
+        return
+    
+    if len(active_polls) > 1:
+        keyboard = [[InlineKeyboardButton(f'Опрос {poll_id}: {message[:20]}...', callback_data=f'results_{poll_id}')] for poll_id, message in active_polls]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(chat_id=user_id, text='Выберите опрос для просмотра результатов:', reply_markup=reply_markup)
+    else:
+        poll_id = active_polls[0][0]
+        await show_results(update, context, poll_id, user_id)
+
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
 
