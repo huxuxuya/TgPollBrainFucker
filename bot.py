@@ -103,15 +103,20 @@ def get_group_title(chat_id: int) -> str:
     row = c.fetchone()
     return row[0] if row else f"ID: {chat_id}"
 
-def get_user_name(user_id: int) -> str:
+def get_user_name(user_id: int, markdown_link: bool = False) -> str:
     c.execute('SELECT first_name, last_name, username FROM participants WHERE user_id = ?', (user_id,))
     user_data = c.fetchone()
     if not user_data: return f"User ID: {user_id}"
+    
     first_name, last_name, username = user_data
     name = first_name or ''
     if last_name: name += f' {last_name}'
-    if not name.strip(): name = f'@{username}' if username else f"ID: {user_id}"
-    return name.strip()
+    name = name.strip()
+    if not name: name = f'@{username}' if username else f"User ID: {user_id}"
+
+    if markdown_link:
+        return f"[{name}](tg://user?id={user_id})"
+    return name
 
 def get_progress_bar(progress, total, length=20):
     if total <= 0: return "[]", 0
@@ -174,11 +179,12 @@ def generate_poll_text(poll_id: int) -> str:
 
         if option_data['show_names'] and count > 0:
             responders = [r[0] for r in responses if r[1] == option_text]
-            user_names = [get_user_name(uid) for uid in responders]
+            user_names = [get_user_name(uid, markdown_link=True) for uid in responders]
             names_list = [f"{option_data['emoji']}{name}" for name in user_names]
             indent = "    "
             if option_data['names_style'] == 'list': text_parts.append("\n".join(f"{indent}{name}" for name in names_list))
             elif option_data['names_style'] == 'inline': text_parts.append(f'{indent}{", ".join(names_list)}')
+            elif option_data['names_style'] == 'numbered': text_parts.append("\n".join(f"{indent}{i}. {name}" for i, name in enumerate(names_list, 1)))
         text_parts.append("")
 
     if target_sum > 0:
@@ -480,6 +486,7 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         return
     elif command == "shownames": c.execute('UPDATE poll_option_settings SET show_names = ? WHERE poll_id = ? AND option_index = ?', (int(data[4]), poll_id, option_index))
     elif command == "priority": c.execute('UPDATE poll_option_settings SET is_priority = ? WHERE poll_id = ? AND option_index = ?', (int(data[4]), poll_id, option_index))
+    elif command == "namesstyle": c.execute('UPDATE poll_option_settings SET names_style = ? WHERE poll_id = ? AND option_index = ?', (data[4], poll_id, option_index))
     
     conn.commit()
     await show_option_settings_menu(query, context, poll_id, option_index)
@@ -489,25 +496,41 @@ async def show_option_settings_menu(query: Union[CallbackQuery, None], context: 
     option_text = c.fetchone()[0].split(',')[option_index].strip()
     c.execute('SELECT default_show_names FROM poll_settings WHERE poll_id = ?', (poll_id,))
     default_show = (c.fetchone() or (1,))[0]
-    c.execute('SELECT show_names, emoji, is_priority, contribution_amount FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, option_index))
+    c.execute('SELECT show_names, emoji, is_priority, contribution_amount, names_style FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, option_index))
     opt_settings = c.fetchone()
     
     show_names = default_show if not opt_settings or opt_settings[0] is None else opt_settings[0]
     emoji = (opt_settings[1] or "Не задан") if opt_settings else "Не задан"
     is_priority = (opt_settings[2] or 0) if opt_settings else 0
     contribution = (opt_settings[3] or 0) if opt_settings else 0
+    names_style = (opt_settings[4] or 'list') if opt_settings and opt_settings[4] else 'list'
 
     text = f"Настройки для: *{option_text}*"
+
+    if names_style == 'list':
+        style_text = "Списком"
+        new_style = "inline"
+    elif names_style == 'inline':
+        style_text = "В строку"
+        new_style = "numbered"
+    else: # numbered
+        style_text = "Нумерованный"
+        new_style = "list"
+    style_button = InlineKeyboardButton(f"Стиль: {style_text}", callback_data=f"setresopt_{poll_id}_{option_index}_namesstyle_{new_style}")
+
     kb = [
         [
             InlineKeyboardButton(f"Имена: {'✅' if show_names else '❌'}", callback_data=f"setresopt_{poll_id}_{option_index}_shownames_{int(not show_names)}"),
-            InlineKeyboardButton(f"⭐ Приоритет: {'✅' if is_priority else '❌'}", callback_data=f"setresopt_{poll_id}_{option_index}_priority_{int(not is_priority)}")
+            style_button
+        ],
+        [
+            InlineKeyboardButton(f"⭐ Приоритет: {'✅' if is_priority else '❌'}", callback_data=f"setresopt_{poll_id}_{option_index}_priority_{int(not is_priority)}"),
+            InlineKeyboardButton(f"Взнос: {contribution}", callback_data=f"setresopt_{poll_id}_{option_index}_setcontribution")
         ],
         [
             InlineKeyboardButton(f"Смайлик: {emoji}", callback_data=f"setresopt_{poll_id}_{option_index}_setemoji"),
-            InlineKeyboardButton(f"Взнос: {contribution}", callback_data=f"setresopt_{poll_id}_{option_index}_setcontribution")
+            InlineKeyboardButton("📝 Изменить текст", callback_data=f"setresopt_{poll_id}_{option_index}_edittext")
         ],
-        [InlineKeyboardButton("📝 Изменить текст", callback_data=f"setresopt_{poll_id}_{option_index}_edittext")],
         [InlineKeyboardButton("↩️ Назад", callback_data=f"setresultoptionspoll_{poll_id}")]
     ]
     if message_id and chat_id:
