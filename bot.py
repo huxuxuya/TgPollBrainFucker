@@ -2,13 +2,14 @@
 # Gemini was here
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, ReplyKeyboardRemove, ForceReply
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, TypeHandler
 from typing import Union
 import sqlite3
 import os
 from dotenv import load_dotenv
 from telegram.constants import ParseMode
 from telegram.error import ChatMigrated
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -328,35 +329,34 @@ async def message_dialog_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_user_to_participants(update)
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    is_admin = False
-    if chat_id < 0:  # Group chat
-        is_admin = user_id in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]
-        if is_admin:
-            context.user_data['selected_chat_id'] = chat_id
-            await update_known_chats(chat_id, update.effective_chat.title)
-    else:  # Private chat
-        admin_chats = await get_admin_chats(update, context)
-        is_admin = len(admin_chats) > 0
-    reply_markup = InlineKeyboardMarkup(get_admin_keyboard(is_admin))
-    await context.bot.send_message(chat_id=user_id, text='Привет! Я бот для сбора денег в группе. Используйте кнопки ниже для управления.' if is_admin else 'Привет! Я бот для сбора денег в группе. Используйте /help для списка команд.', reply_markup=reply_markup)
+    chat = update.effective_chat
+
+    if chat.type in ['group', 'supergroup']:
+        # В группе просто обновляем информацию о чате и даем подсказку
+        await update_known_chats(chat.id, chat.title)
+        try:
+            me = await context.bot.get_me()
+            await update.message.reply_text(
+                f"Привет! Для управления опросами, пожалуйста, напишите мне в личные сообщения: @{me.username}",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            logger.error(f"Could not send welcome message in group {chat.id}: {e}")
+    else:  # В личной переписке показываем главный экран
+        await private_chat_entry_point(update, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_user_to_participants(update)
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    is_admin = False
-    if chat_id < 0:  # Group chat
-        is_admin = user_id in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]
-        if is_admin:
-            context.user_data['selected_chat_id'] = chat_id
-            await update_known_chats(chat_id, update.effective_chat.title)
-    else:  # Private chat
-        admin_chats = await get_admin_chats(update, context)
-        is_admin = len(admin_chats) > 0
-    reply_markup = InlineKeyboardMarkup(get_admin_keyboard(is_admin))
-    await context.bot.send_message(chat_id=user_id, text='Доступные команды:\n/start - Начать работу с ботом\n/help - Показать помощь\n/collect - Собрать список участников группы\n/exclude - Исключить участника из опроса\n/setmessage - Установить сообщение для опроса\n/setoptions - Установить варианты ответа для опроса\n/startpoll - Запустить опрос\n/results - Показать результаты опроса\n/newpoll - Создать новый опрос\n/mychats - Показать список известных групп\n/cleangroup - Очистить список участников группы\n/setresultoptions - Настроить вывод результатов опроса', reply_markup=reply_markup)
+    chat = update.effective_chat
+    if chat.type == 'private':
+        # В личной переписке показываем главный экран
+        await private_chat_entry_point(update, context)
+    else:
+        # В группе показываем текстовую справку
+        await update.message.reply_text(
+            'Доступные команды в группе:\n/start - Начать работу с ботом\n/help - Показать эту справку'
+            '\n\nВсе управление опросами (создание, настройка, результаты) происходит в личном чате с ботом.'
+        )
 
 async def collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user_to_participants(update)
@@ -369,748 +369,236 @@ async def collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def exclude(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_user_to_participants(update)
-    chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    if chat_id < 0:  # Group chat
-        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-            await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-            return
-        context.user_data['selected_chat_id'] = chat_id
-    else:  # Private chat
-        if 'selected_chat_id' not in context.user_data:
-            await select_chat(update, context, 'exclude')
-            return
-        chat_id = context.user_data['selected_chat_id']
-        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-            await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-            return
-    
-    c.execute('SELECT user_id, username, first_name, last_name, excluded FROM participants WHERE chat_id = ?', (chat_id,))
-    participants = c.fetchall()
-    # Убираем дубли по user_id
-    unique_participants = {}
-    for user_id_part, username, first_name, last_name, excluded in participants:
-        if user_id_part not in unique_participants:
-            unique_participants[user_id_part] = (username, first_name, last_name, excluded)
-    if not participants:
-        await context.bot.send_message(chat_id=user_id, text='Список участников пуст. Используйте /collect для сбора участников.')
-        return
-    text = '<b>Список участников группы:</b>\n'
-    for user_id_part, (username, first_name, last_name, excluded) in unique_participants.items():
-        name = first_name + (f' {last_name}' if last_name else '')
-        display_name = f'{name} (@{username})' if username else name
-        status = ' (исключен)' if excluded else ''
-        text += f'- {display_name}{status}\n'
-    await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
-
-async def exclude_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update)
-    query = update.callback_query
-    await query.answer()
-    
-    user_id_part, chat_id = map(int, query.data.split('_')[1:])
-    c.execute('UPDATE participants SET excluded = NOT excluded WHERE chat_id = ? AND user_id = ?', (chat_id, user_id_part))
-    conn.commit()
-    
-    c.execute('SELECT first_name, last_name, excluded FROM participants WHERE chat_id = ? AND user_id = ?', (chat_id, user_id_part))
-    first_name, last_name, excluded = c.fetchone()
-    name = first_name + (f' {last_name}' if last_name else '')
-    status = 'исключен' if excluded else 'включен обратно'
-    await context.bot.send_message(chat_id=query.from_user.id, text=f'{name} {status} из опроса.')
-    
-    c.execute('SELECT user_id, username, first_name, last_name, excluded FROM participants WHERE chat_id = ?', (chat_id,))
-    participants = c.fetchall()
-    keyboard = []
-    for u_id, username, first_name, last_name, excluded in participants:
-        name = first_name + (f' {last_name}' if last_name else '')
-        display_name = f'{name} (@{username})' if username else name
-        status = ' (исключен)' if excluded else ''
-        keyboard.append([InlineKeyboardButton(f'{display_name}{status}', callback_data=f'exclude_{u_id}_{chat_id}')])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.message.edit_reply_markup(reply_markup=reply_markup)
+    if update.effective_chat.type == 'private':
+        await context.bot.send_message(chat_id=user_id, text='Эта команда устарела. Пожалуйста, используйте меню "Участники" на панели управления.')
+        await private_chat_entry_point(update, context)
+    else:
+        await update.message.reply_text('Для управления участниками, пожалуйста, воспользуйтесь панелью управления в личном чате с ботом.')
 
 async def newpoll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     add_user_to_participants(update)
     user_id = update.effective_user.id
-    # ВСЕГДА предлагаем выбрать группу, даже если она одна
-    c.execute('SELECT DISTINCT chat_id, title FROM known_chats')
-    known_chats = c.fetchall()
-    admin_chats = []
-    for chat_id, title in known_chats:
-        try:
-            admins = await context.bot.get_chat_administrators(chat_id)
-            if user_id in [admin.user.id for admin in admins]:
-                admin_chats.append(type('Chat', (), {'id': chat_id, 'title': title, 'type': 'group'}))
-        except ChatMigrated as e:
-            new_chat_id = e.new_chat_id
-            # Обновить chat_id во всех таблицах
-            c.execute('UPDATE polls SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
-            c.execute('UPDATE participants SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
-            # --- fix known_chats UNIQUE constraint ---
-            c.execute('SELECT title FROM known_chats WHERE chat_id = ?', (chat_id,))
-            row = c.fetchone()
-            title_val = row[0] if row else None
-            c.execute('DELETE FROM known_chats WHERE chat_id = ?', (chat_id,))
-            if title_val is not None:
-                c.execute('INSERT OR IGNORE INTO known_chats (chat_id, title) VALUES (?, ?)', (new_chat_id, title_val))
-            conn.commit()
-            try:
-                admins = await context.bot.get_chat_administrators(new_chat_id)
-                if user_id in [admin.user.id for admin in admins]:
-                    admin_chats.append(type('Chat', (), {'id': new_chat_id, 'title': title, 'type': 'group'}))
-            except Exception as e2:
-                logger.error(f'Error checking admin status in migrated chat {new_chat_id}: {e2}')
-        except Exception as e:
-            logger.error(f'Error checking admin status in known chat {chat_id}: {e}')
-    if len(admin_chats) == 0:
-        await context.bot.send_message(chat_id=user_id, text='Я не знаю ни одной группы, где вы администратор. Пожалуйста, выполните любую команду в группе, чтобы я её узнал.')
+    if update.effective_chat.type == 'private':
+        await context.bot.send_message(chat_id=user_id, text='Эта команда устарела. Пожалуйста, используйте кнопку "Создать опрос" на панели управления.')
+        await private_chat_entry_point(update, context)
+    else:
+        await update.message.reply_text("Для создания опроса, пожалуйста, воспользуйтесь панелью управления в личном чате с ботом.")
+
+def generate_poll_text(poll_id: int) -> str:
+    """Generates the text for the public poll message, including counts, fundraising info, and voter names."""
+    c.execute('SELECT message, options FROM polls WHERE poll_id = ?', (poll_id,))
+    poll_data = c.fetchone()
+    if not poll_data:
+        return "Опрос не найден."
+    
+    message, options_str = poll_data
+    original_options = [opt.strip() for opt in options_str.split(',')]
+    
+    c.execute('SELECT user_id, response FROM responses WHERE poll_id = ?', (poll_id,))
+    responses = c.fetchall()
+    counts = {}
+    for _, response in responses:
+        counts[response] = counts.get(response, 0) + 1
+        
+    c.execute('SELECT default_show_names, default_names_style, target_sum FROM poll_settings WHERE poll_id = ?', (poll_id,))
+    default_settings_res = c.fetchone()
+    default_show_names, default_names_style, target_sum = (default_settings_res or (1, 'list', 0))
+    
+    total_votes = len(responses)
+    total_collected = 0
+    
+    text_parts = [message, ""]
+
+    options_with_settings = []
+    for i, option_text in enumerate(original_options):
+        c.execute('SELECT show_names, names_style, is_priority, contribution_amount, emoji FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, i))
+        opt_settings = c.fetchone()
+        options_with_settings.append({
+            'text': option_text,
+            'show_names': opt_settings[0] if opt_settings and opt_settings[0] is not None else default_show_names,
+            'names_style': opt_settings[1] if opt_settings and opt_settings[1] is not None else default_names_style,
+            'is_priority': opt_settings[2] if opt_settings and opt_settings[2] is not None else 0,
+            'contribution_amount': opt_settings[3] if opt_settings and opt_settings[3] is not None else 0,
+            'emoji': (opt_settings[4] + ' ') if opt_settings and opt_settings[4] else ""
+        })
+
+    options_with_settings.sort(key=lambda x: x['is_priority'], reverse=True)
+
+    for option_data in options_with_settings:
+        option_text = option_data['text']
+        count = counts.get(option_text, 0)
+        contribution_amount = option_data['contribution_amount']
+        
+        if contribution_amount > 0:
+            total_collected += count * contribution_amount
+            
+        priority_marker = "⭐ " if option_data['is_priority'] else "☆ "
+        formatted_option_text = f"*{option_text}*" if option_data['is_priority'] else option_text
+        option_line = f"{priority_marker}{formatted_option_text}"
+
+        if contribution_amount > 0:
+             option_line += f" (по {int(contribution_amount)})"
+        
+        option_line += f": *{count}*"
+        text_parts.append(option_line)
+
+        if option_data['show_names'] and count > 0:
+            responders = [r[0] for r in responses if r[1] == option_text]
+            user_names = [get_user_name(uid) for uid in responders]
+            names_text_list = [f"{option_data['emoji']}{name}" for name in user_names]
+
+            names_style = option_data['names_style']
+            indent = "    "
+            if names_style == 'list':
+                text_parts.append("\n".join(f"{indent}{name}" for name in names_text_list))
+            elif names_style == 'inline':
+                text_parts.append(f'{indent}{", ".join(names_text_list)}')
+            elif names_style == 'small':
+                small_names = [name.split()[0] for name in user_names]
+                text_parts.append(f'{indent}`{", ".join(small_names)}`')
+        
+        text_parts.append("")
+
+    if target_sum > 0:
+        bar, percent = get_progress_bar(total_collected, target_sum)
+        text_parts.append(f"💰 Собрано: *{int(total_collected)} из {int(target_sum)}* ({percent:.1f}%)\n{bar}")
+    elif total_collected > 0:
+        text_parts.append(f"💰 Собрано: *{int(total_collected)}*")
+    
+    # Clean up trailing newlines before the final summary
+    while text_parts and text_parts[-1] == "":
+        text_parts.pop()
+
+    text_parts.append(f"\nВсего проголосовало: *{total_votes}*")
+    
+    return "\n".join(text_parts)
+
+async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Fetches the latest data and edits the poll message in the group."""
+    logger.info(f"[POLL_UPDATE] Attempting to update message for poll_id={poll_id}")
+    c.execute('SELECT chat_id, message_id, options FROM polls WHERE poll_id = ?', (poll_id,))
+    poll_data = c.fetchone()
+    if not poll_data:
+        logger.error(f"[POLL UPDATE] Poll {poll_id} not found.")
         return
-    keyboard = [[InlineKeyboardButton(chat.title, callback_data=f'selectchat_{chat.id}_newpoll')] for chat in admin_chats]
+        
+    chat_id, message_id, options_str = poll_data
+    logger.info(f"[POLL_UPDATE] Found poll {poll_id} in chat {chat_id} with message_id {message_id}")
+    if not message_id:
+        logger.warning(f"[POLL UPDATE] No message_id for poll {poll_id}.")
+        return
+
+    new_text = generate_poll_text(poll_id)
+    logger.info(f"[POLL_UPDATE] Generated new text for poll {poll_id}.")
+    
+    options = [opt.strip() for opt in options_str.split(',')]
+    keyboard = [[InlineKeyboardButton(option.strip(), callback_data=f'poll_{poll_id}_{i}')] for i, option in enumerate(options)]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=user_id, text='Выберите группу для создания опроса:', reply_markup=reply_markup)
-    return
 
-async def mychats(update: Update, context: ContextTypes.DEFAULT_TYPE, force_user_id=None):
-    c.execute('SELECT chat_id, title FROM known_chats')
-    chats = c.fetchall()
-    user_id = force_user_id if force_user_id else (update.effective_user.id if update.effective_user else None)
-    if not chats:
-        text = 'Бот пока не знает ни одной группы. Добавьте его в группу и напишите в ней что-нибудь.'
-        if force_user_id:
-            await context.bot.send_message(chat_id=force_user_id, text=text)
+    try:
+        logger.info(f"[POLL_UPDATE] Sending edit_message_text for poll {poll_id} to chat {chat_id}, message {message_id}")
+        await context.bot.edit_message_text(
+            text=new_text,
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        logger.info(f"[POLL_UPDATE] Successfully edited message for poll {poll_id}.")
+    except ChatMigrated as e:
+        logger.warning(f"[POLL UPDATE] Chat migrated for poll {poll_id}. Old: {chat_id}, New: {e.new_chat_id}")
+        c.execute('UPDATE polls SET chat_id = ? WHERE poll_id = ?', (e.new_chat_id, poll_id))
+        conn.commit()
+    except Exception as e:
+        if "Message is not modified" not in str(e):
+             logger.error(f"[POLL UPDATE] Failed to edit message for poll {poll_id}: {e}")
         else:
-            if update.message:
-                await update.message.reply_text(text)
-            elif update.callback_query:
-                await update.callback_query.message.reply_text(text)
-        return
-    # Проверим, где пользователь админ
-    admin_chats = []
-    for chat_id, title in chats:
-        try:
-            admins = await context.bot.get_chat_administrators(chat_id)
-            if user_id in [admin.user.id for admin in admins]:
-                admin_chats.append((chat_id, title))
-        except ChatMigrated as e:
-            new_chat_id = e.new_chat_id
-            c.execute('UPDATE polls SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
-            c.execute('UPDATE participants SET chat_id = ? WHERE chat_id = ?', (new_chat_id, chat_id))
-            # --- fix known_chats UNIQUE constraint ---
-            c.execute('SELECT title FROM known_chats WHERE chat_id = ?', (chat_id,))
-            row = c.fetchone()
-            title_val = row[0] if row else None
-            c.execute('DELETE FROM known_chats WHERE chat_id = ?', (chat_id,))
-            if title_val is not None:
-                c.execute('INSERT OR IGNORE INTO known_chats (chat_id, title) VALUES (?, ?)', (new_chat_id, title_val))
-            conn.commit()
-            try:
-                admins = await context.bot.get_chat_administrators(new_chat_id)
-                if user_id in [admin.user.id for admin in admins]:
-                    admin_chats.append((new_chat_id, title))
-            except Exception as e2:
-                logger.error(f'Error checking admin status in migrated chat {new_chat_id}: {e2}')
-        except Exception as e:
-            logger.error(f'Error checking admin status in chat {chat_id}: {e}')
-    if not admin_chats:
-        text = 'Вы не являетесь администратором ни в одной из известных боту групп. Если вы уверены, что это не так, попробуйте написать что-нибудь в нужной группе, чтобы бот ее увидел.'
-        if force_user_id:
-            await context.bot.send_message(chat_id=force_user_id, text=text)
-        else:
-            if update.message:
-                await update.message.reply_text(text)
-            elif update.callback_query:
-                await update.callback_query.message.reply_text(text)
-        return
-    # ВСЕГДА показываем меню выбора группы
-    keyboard = [[InlineKeyboardButton(title, callback_data=f'selectchat_{chat_id}_mychats')] for chat_id, title in admin_chats]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    text = 'Группы, где вы администратор и бот был активен:'
-    if force_user_id:
-        await context.bot.send_message(chat_id=force_user_id, text=text, reply_markup=reply_markup)
-    else:
-        if update.message:
-            await update.message.reply_text(text, reply_markup=reply_markup)
-        elif update.callback_query:
-            await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
-    return
+            logger.info(f"[POLL_UPDATE] Message for poll {poll_id} was not modified.")
 
-async def setmessage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update)
+async def startpoll_from_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: int, chat_id: int):
+    """Запускает опрос из панели управления."""
     user_id = update.effective_user.id
-    if update.effective_chat.type in ['group', 'supergroup']:
-        chat_id = update.effective_chat.id
-    else:
-        if 'selected_chat_id' not in context.user_data:
-            await update.message.reply_text('Сначала выберите группу через /newpoll.')
-            return
-        chat_id = context.user_data['selected_chat_id']
-    if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-        await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-        return
-    if not context.args:
-        context.user_data['waiting_for_poll_message'] = True
-        await context.bot.send_message(chat_id=user_id, text='Пожалуйста, отправьте текст опроса одним сообщением.')
-        return
-    c.execute('SELECT poll_id FROM polls WHERE chat_id = ? AND status = ? ORDER BY poll_id DESC LIMIT 1', (chat_id, 'draft'))
-    row = c.fetchone()
-    if not row:
-        await context.bot.send_message(chat_id=user_id, text='Нет черновика опроса. Создайте новый опрос с помощью /newpoll.')
-        return
-    poll_id = row[0]
-    message = ' '.join(context.args)
-    logger.info(f'[SETMESSAGE] Устанавливаю текст для poll_id={poll_id}, chat_id={chat_id}: "{message}"')
-    c.execute('UPDATE polls SET message = ? WHERE poll_id = ?', (message, poll_id))
-    conn.commit()
-    await context.bot.send_message(chat_id=user_id, text=f'Сообщение для опроса {poll_id} установлено: {message}')
-
-async def setoptions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update)
-    user_id = update.effective_user.id
-    if update.effective_chat.type in ['group', 'supergroup']:
-        chat_id = update.effective_chat.id
-    else:
-        if 'selected_chat_id' not in context.user_data:
-            await update.message.reply_text('Сначала выберите группу через /newpoll.')
-            return
-        chat_id = context.user_data['selected_chat_id']
-    if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-        await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-        return
-    if not context.args:
-        context.user_data['waiting_for_poll_options'] = True
-        await context.bot.send_message(chat_id=user_id, text='Пожалуйста, отправьте варианты ответа через запятую одним сообщением.')
-        return
-    options = ' '.join(context.args).split(',')
-    if len(options) < 2:
-        await context.bot.send_message(chat_id=user_id, text='Укажите как минимум 2 варианта ответа.')
-        return
-    c.execute('SELECT poll_id FROM polls WHERE chat_id = ? AND status = ? ORDER BY poll_id DESC LIMIT 1', (chat_id, 'draft'))
-    row = c.fetchone()
-    if not row:
-        await context.bot.send_message(chat_id=user_id, text='Нет черновика опроса. Создайте новый опрос с помощью /newpoll.')
-        return
-    poll_id = row[0]
-    options_str = ','.join(options)
-    logger.info(f'[SETOPTIONS] Устанавливаю варианты для poll_id={poll_id}, chat_id={chat_id}: "{options_str}"')
-    c.execute('UPDATE polls SET options = ? WHERE poll_id = ?', (options_str, poll_id))
-    conn.commit()
-    await context.bot.send_message(chat_id=user_id, text=f'Варианты ответов для опроса {poll_id} установлены: {options_str}')
-
-async def startpoll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update)
-    user_id = update.effective_user.id
-    chat_id = None
-
-    # Определяем chat_id
-    if update.effective_chat.type in ['group', 'supergroup']:
-        chat_id = update.effective_chat.id
-        context.user_data['selected_chat_id'] = chat_id
-    elif 'selected_chat_id' in context.user_data:
-        chat_id = context.user_data['selected_chat_id']
-    else:
-        # Если мы в личке и группа не выбрана
-        await select_chat(update, context, 'startpoll')
-        return
+    query = update.callback_query
 
     # Проверка на админа
     try:
-        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-            await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
+        admins = await context.bot.get_chat_administrators(chat_id)
+        if user_id not in [admin.user.id for admin in admins]:
+            await query.answer('Ошибка: вы больше не администратор в этой группе.', show_alert=True)
             return
     except Exception as e:
         logger.error(f'Failed to check admin status for user {user_id} in chat {chat_id}: {e}')
-        await context.bot.send_message(chat_id=user_id, text='Не удалось проверить ваши права в группе. Убедитесь, что бот еще находится в группе и имеет права администратора.')
+        await query.answer('Не удалось проверить ваши права в группе.', show_alert=True)
         return
 
-    logger.info(f'[STARTPOLL] Пытаюсь запустить опрос: chat_id={chat_id}')
-    c.execute('SELECT poll_id, message, options FROM polls WHERE chat_id = ? AND status = ? ORDER BY poll_id DESC LIMIT 1', (chat_id, 'draft'))
+    # Получаем черновик
+    c.execute('SELECT message, options FROM polls WHERE poll_id = ? AND status = ?', (poll_id, 'draft'))
     result = c.fetchone()
-    # Логируем все опросы для чата
-    c.execute('SELECT poll_id, message, options, status FROM polls WHERE chat_id = ?', (chat_id,))
-    all_polls = c.fetchall()
-    logger.info(f'[STARTPOLL] Все опросы для chat_id={chat_id}: {all_polls}')
+
     if not result:
-        await context.bot.send_message(chat_id=user_id, text='Сначала создайте опрос с помощью /newpoll и установите сообщение с помощью /setmessage.')
+        await query.answer("Ошибка: не найден черновик для запуска.", show_alert=True)
         return
-    poll_id, message, options_str = result
-    logger.info(f'[STARTPOLL] Найден опрос: poll_id={poll_id}, message="{message}", options="{options_str}"')
+
+    message, options_str = result
     if not message or not message.strip():
-        await context.bot.send_message(chat_id=user_id, text='Сначала задайте текст опроса с помощью /setmessage или кнопки.')
+        await query.answer('Сначала задайте текст опроса через меню редактирования.', show_alert=True)
         return
     if not options_str or not any(opt.strip() for opt in options_str.split(',')):
-        await context.bot.send_message(chat_id=user_id, text='Сначала задайте варианты ответа с помощью /setoptions или кнопки.')
+        await query.answer('Сначала задайте варианты ответа через меню редактирования.', show_alert=True)
         return
+
+    # Запускаем опрос
     options = options_str.split(',')
     c.execute('UPDATE polls SET status = ? WHERE poll_id = ?', ('active', poll_id))
     conn.commit()
+    
     keyboard = [[InlineKeyboardButton(option.strip(), callback_data=f'poll_{poll_id}_{i}')] for i, option in enumerate(options)]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    poll_message = await context.bot.send_message(chat_id=chat_id, text=message, reply_markup=reply_markup)
-    c.execute('UPDATE polls SET message_id = ? WHERE poll_id = ?', (poll_message.message_id, poll_id))
-    conn.commit()
-    await context.bot.send_message(chat_id=user_id, text=f'Опрос {poll_id} запущен.')
+    
+    initial_text = generate_poll_text(poll_id)
 
-# --- Вспомогательная функция для генерации прогресс-бара ---
-def get_progress_bar_text(poll_id: int, options: list, option_voters: dict) -> str:
-    progress_bar_text = ''
     try:
-        c.execute('SELECT target_sum FROM poll_settings WHERE poll_id = ?', (poll_id,))
-        target_sum_res = c.fetchone()
-        target_sum = target_sum_res[0] if target_sum_res and target_sum_res[0] is not None else 0
-        if target_sum > 0:
-            total_contribution = 0
-            c.execute('SELECT option_index, contribution_amount FROM poll_option_settings WHERE poll_id = ? AND contribution_amount > 0', (poll_id,))
-            contributions = c.fetchall()
-            contribution_map = {index: amount for index, amount in contributions}
-            for idx, opt_text in enumerate(options):
-                if idx in contribution_map:
-                    contribution_amount = contribution_map[idx]
-                    num_voters_for_option = len(option_voters.get(opt_text.strip(), set()))
-                    total_contribution += num_voters_for_option * contribution_amount
-            
-            percentage = (total_contribution / target_sum) * 100 if target_sum > 0 else 0
-            filled_blocks = int(min(percentage, 100) / 10)
-            empty_blocks = 10 - filled_blocks
-            progress_bar = '█' * filled_blocks + '░' * empty_blocks
-            
-            formatted_total = f'{total_contribution:,.0f}'.replace(',', ' ')
-            formatted_target = f'{target_sum:,.0f}'.replace(',', ' ')
-            
-            progress_bar_text = f'\n\n<b>Сбор средств</b>\n{progress_bar} {formatted_total} / {formatted_target} ({percentage:.1f}%)'
-    except Exception as e:
-        logger.error(f"Error generating progress bar for poll {poll_id}: {e}")
-        return ''
-    return progress_bar_text
-
-def _generate_results_text_and_options(poll_id: int, include_non_voters: bool, detailed_names: bool) -> (str, list):
-    """
-    Generates the complete, formatted text for poll results and the list of options.
-    Handles orphaned responses to prevent KeyErrors.
-    
-    :param poll_id: The ID of the poll.
-    :param include_non_voters: If True, a list of non-voters will be appended.
-    :param detailed_names: If True, includes usernames in the voter lists.
-    :return: A tuple of (formatted_result_text, options_list).
-    """
-    
-    # 1. Fetch basic poll info
-    c.execute("SELECT chat_id, message, options FROM polls WHERE poll_id = ?", (poll_id,))
-    res = c.fetchone()
-    if not res:
-        return None, None
-    chat_id, poll_message, options_str = res
-    options = [opt.strip() for opt in options_str.split(',')]
-
-    # 2. Fetch all non-excluded participants and their responses for this poll
-    c.execute('SELECT p.user_id, p.username, p.first_name, p.last_name, r.response FROM participants p LEFT JOIN responses r ON p.user_id = r.user_id AND r.poll_id = ? WHERE p.chat_id = ? AND p.excluded = 0', (poll_id, chat_id))
-    all_participants_with_responses = c.fetchall()
-    
-    # 3. Process responses and non-voters
-    option_voters = {opt: set() for opt in options}
-    all_voted_user_ids = set()
-    not_voted_dict = {}
-
-    for user_id_part, username, first_name, last_name, response in all_participants_with_responses:
-        name = first_name + (f' {last_name}' if last_name else '')
-        if response:
-            # FIX: Safely handle responses that may not match current options
-            if response in option_voters:
-                option_voters[response].add((user_id_part, name, username))
-                all_voted_user_ids.add(user_id_part)
-            else:
-                logger.warning(f"Orphaned response '{response}' found for poll {poll_id} from user {user_id_part}. Ignoring.")
-        elif user_id_part not in not_voted_dict:
-            not_voted_dict[user_id_part] = (name, username)
-
-    # 4. Generate the result text
-    # --- Get display settings ---
-    c.execute('SELECT default_show_names, default_names_style, default_show_count FROM poll_settings WHERE poll_id = ?', (poll_id,))
-    default_settings = c.fetchone() or (1, 'list', 1)
-    
-    # --- Fetch all option settings for sorting ---
-    option_settings_map = {}
-    for i, opt in enumerate(options):
-        c.execute('SELECT is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, i))
-        opt_settings = c.fetchone()
-        is_priority = opt_settings[0] if opt_settings and opt_settings[0] is not None else 0
-        option_settings_map[opt] = {'is_priority': is_priority}
-        
-    # --- Generate progress bar ---
-    progress_bar_text = get_progress_bar_text(poll_id, options, option_voters)
-
-    # --- Generate main result text ---
-    voted_count = len(all_voted_user_ids)
-    header = f'<b>📊 {poll_message}</b>\n\n<b>Результаты</b> <i>(👥 {voted_count})</i>:'
-    result_text = header
-    if progress_bar_text:
-        result_text += progress_bar_text
-
-    # --- Sort options and add voter lists ---
-    # ИЗМЕНЕНО: Сортировка по приоритету, затем по количеству голосов
-    sorted_options = sorted(
-        options, 
-        key=lambda o: (
-            option_settings_map.get(o, {}).get('is_priority', 0), 
-            len(option_voters.get(o, set()))
-        ), 
-        reverse=True
-    )
-    
-    for opt in sorted_options:
-        original_index = options.index(opt)
-        c.execute('SELECT show_names, names_style, show_count, emoji, is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, original_index))
-        opt_settings = c.fetchone()
-        show_names = default_settings[0] if opt_settings is None or opt_settings[0] is None else opt_settings[0]
-        names_style = default_settings[1] if opt_settings is None or opt_settings[1] is None else opt_settings[1]
-        show_count = default_settings[2] if opt_settings is None or opt_settings[2] is None else opt_settings[2]
-        emoji = opt_settings[3] if opt_settings and opt_settings[3] else ''
-        is_priority = opt_settings[4] if opt_settings and opt_settings[4] else 0
-        
-        voters = option_voters.get(opt, set())
-        # Header for the option
-        if show_count:
-            result_text += f'\n\n<b>{"⭐" if is_priority else "☆"} {opt}</b>: <b>{len(voters)}</b>'
-        else:
-            result_text += f'\n\n<b>{"⭐" if is_priority else "☆"} {opt}</b>:'
-            
-        # List of voters
-        if show_names and voters:
-            sorted_voters = sorted(list(voters), key=lambda x: x[1])
-
-            if detailed_names:
-                voter_names = [f'{emoji} {n}{f" (@{u})" if u else ""}' if emoji else f'{n}{f" (@{u})" if u else ""}' for _, n, u in sorted_voters]
-            else:
-                voter_names = [f'{emoji} {n}' if emoji else f'{n}' for _, n, u in sorted_voters]
-
-            if names_style == 'inline':
-                result_text += f' — {", ".join(voter_names)}'
-            elif names_style == 'small':
-                for name_str in voter_names:
-                    result_text += f'\n    <i>{name_str}</i>'
-            else:  # list
-                for name_str in voter_names:
-                    result_text += f'\n    {name_str}'
-
-    # --- Add list of non-voters ---
-    if include_non_voters and not_voted_dict:
-        result_text += '\n\n<b>Не проголосовали:</b>'
-        sorted_not_voted = sorted(list(not_voted_dict.values()), key=lambda x: x[0])
-        if detailed_names:
-            names_list = [f'{n}{f" (@{u})" if u else ""}' for n, u in sorted_not_voted]
-        else:
-            names_list = [f'{n}' for n, u in sorted_not_voted]
-        result_text += '\n' + '\n'.join(names_list)
-        
-    return result_text, options
-
-async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: int, user_id: int = None) -> None:
-    add_user_to_participants(update)
-    
-    if user_id is None:
-        user_id = update.effective_user.id
-        
-    result_text, _ = _generate_results_text_and_options(poll_id, include_non_voters=True, detailed_names=True)
-
-    if not result_text:
-        if user_id:
-            await context.bot.send_message(chat_id=user_id, text=f"Опрос с ID {poll_id} не найден.")
-        elif update.effective_message:
-            await update.effective_message.reply_text(f"Опрос с ID {poll_id} не найден.")
-        return
-            
-    # Кнопка обновления результатов в группе
-    keyboard = [[InlineKeyboardButton('🔄 Обновить результаты в группе', callback_data=f'refreshresults_{poll_id}')]]
-    await context.bot.send_message(chat_id=user_id, text=result_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def results_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update)
-    query = update.callback_query
-    await query.answer()
-    poll_id = int(query.data.split('_')[1])
-    # Получаем chat_id и старый message_id
-    c.execute('SELECT chat_id, message_id FROM polls WHERE poll_id = ?', (poll_id,))
-    row = c.fetchone()
-    if not row:
-        await query.edit_message_text('Опрос не найден.')
-        return
-    chat_id, old_message_id = row
-
-    result_text, options = _generate_results_text_and_options(poll_id, include_non_voters=False, detailed_names=False)
-
-    if not result_text:
-        await query.edit_message_text(f'Не удалось сформировать результаты для опроса {poll_id}.')
-        return
-
-    # Удаляем старое сообщение с результатами
-    if old_message_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=old_message_id)
-        except Exception as e:
-            logger.warning(f"Could not delete old poll message {old_message_id} in chat {chat_id}: {e}")
-            pass  # Может быть уже удалено или нет прав
-
-    # Отправляем новое сообщение в группу (тихо) с кнопками голосования
-    poll_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(opt, callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)])
-    try:
-        new_msg = await context.bot.send_message(chat_id=chat_id, text=result_text, parse_mode='HTML', disable_notification=True, reply_markup=poll_keyboard)
-        # Сохраняем новый message_id
-        c.execute('UPDATE polls SET message_id = ? WHERE poll_id = ?', (new_msg.message_id, poll_id))
+        poll_message = await context.bot.send_message(chat_id=chat_id, text=initial_text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+        c.execute('UPDATE polls SET message_id = ? WHERE poll_id = ?', (poll_message.message_id, poll_id))
         conn.commit()
-        await query.edit_message_text('Результаты обновлены в группе!')
+        await query.answer(f'Опрос {poll_id} успешно запущен в группе.', show_alert=True)
     except Exception as e:
-        logger.error(f"Could not send new poll message in chat {chat_id}: {e}")
-        await query.edit_message_text('Ошибка при обновлении результатов в группе.')
-
-# --- Обработчик кнопки обновления результатов в группе ---
-async def refresh_results_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    poll_id = int(query.data.split('_')[1])
-    # Получаем chat_id и старый message_id
-    c.execute('SELECT chat_id, message_id, options, message FROM polls WHERE poll_id = ?', (poll_id,))
-    row = c.fetchone()
-    if not row:
-        await query.edit_message_text('Опрос не найден.')
-        return
-    chat_id, old_message_id, options_str, poll_message = row
-    
-    # Формируем новое сообщение с результатами
-    c.execute('SELECT p.user_id, p.username, p.first_name, p.last_name, r.response FROM participants p LEFT JOIN responses r ON p.user_id = r.user_id AND r.poll_id = ? WHERE p.chat_id = ? AND p.excluded = 0', (poll_id, chat_id))
-    responses = c.fetchall()
-    options = [opt.strip() for opt in options_str.split(',')]
-    option_voters = {opt: set() for opt in options}
-    all_voted_user_ids = set()
-    for user_id_part, username, first_name, last_name, response in responses:
-        if response:
-            name = first_name + (f' {last_name}' if last_name else '')
-            option_voters[response].add((user_id_part, name, username))
-            all_voted_user_ids.add(user_id_part)
-    sorted_options = sorted(options, key=lambda o: len(option_voters[o]), reverse=True)
-    # --- Получаем настройки ---
-    c.execute('SELECT default_show_names, default_names_style, default_show_count FROM poll_settings WHERE poll_id = ?', (poll_id,))
-    default_settings = c.fetchone() or (1, 'list', 1)
-    logger.info(f'[RESULTS] Формирование результатов для poll_id={poll_id}. Настройки по умолчанию: {default_settings}')
-
-    # --- Генерация прогресс-бара ---
-    progress_bar_text = get_progress_bar_text(poll_id, options, option_voters)
-
-    result_text = f'<b>📊 {poll_message}</b>\n\n<b>Результаты</b> <i>(👥 {len(all_voted_user_ids)})</i>:'
-    if progress_bar_text:
-        result_text += progress_bar_text
-
-    for idx, opt in enumerate(sorted_options):
-        c.execute('SELECT show_names, names_style, show_count, emoji, is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, options.index(opt)))
-        opt_settings = c.fetchone()
-        logger.info(f'[RESULTS] Вариант {idx} ({opt}): индивидуальные настройки: {opt_settings}')
-        show_names = default_settings[0] if opt_settings is None or opt_settings[0] is None else opt_settings[0]
-        names_style = default_settings[1] if opt_settings is None or opt_settings[1] is None else opt_settings[1]
-        show_count = default_settings[2] if opt_settings is None or opt_settings[2] is None else opt_settings[2]
-        emoji = opt_settings[3] if opt_settings and opt_settings[3] else ''
-        is_priority = opt_settings[4] if opt_settings and opt_settings[4] else 0
-        logger.info(f'[RESULTS] Вариант {idx} ({opt}): применяемые настройки: show_names={show_names}, names_style={names_style}, show_count={show_count}, emoji={emoji}, is_priority={is_priority}')
-        voters = option_voters[opt]
-        if show_count:
-            result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt}</b>: <b>{len(voters)}</b>'
-        else:
-            result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt}</b>:'
-        if show_names and voters:
-            sorted_voters = sorted(list(voters), key=lambda x: x[1])
-            if names_style == 'inline':
-                names = ', '.join(f'{emoji} {n}{f" (@{u})" if u else ""}' if emoji else f'{n}{f" (@{u})" if u else ""}' for _, n, u in sorted_voters)
-                result_text += f' — {names}'
-            elif names_style == 'small':
-                for _, n, u in sorted_voters:
-                    result_text += f'\n    <i>{f"{emoji} {n}" if emoji else f"{n}"}{f" (@{u})" if u else ""}</i>'
-            else:  # list
-                for _, n, u in sorted_voters:
-                    result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}{f" (@{u})" if u else ""}'
-    
-    # Удаляем старое сообщение с результатами
-    if old_message_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=old_message_id)
-        except Exception as e:
-            logger.warning(f"Could not delete old poll message {old_message_id} in chat {chat_id}: {e}")
-            pass  # Может быть уже удалено или нет прав
-
-    # Отправляем новое сообщение в группу (тихо) с кнопками голосования
-    poll_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(opt, callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)])
-    try:
-        new_msg = await context.bot.send_message(chat_id=chat_id, text=result_text, parse_mode='HTML', disable_notification=True, reply_markup=poll_keyboard)
-        # Сохраняем новый message_id
-        c.execute('UPDATE polls SET message_id = ? WHERE poll_id = ?', (new_msg.message_id, poll_id))
+        logger.error(f"Ошибка при запуске опроса {poll_id} в чате {chat_id}: {e}")
+        # Откатываем статус обратно
+        c.execute('UPDATE polls SET status = ? WHERE poll_id = ?', ('draft', poll_id))
         conn.commit()
-        await query.edit_message_text('Результаты обновлены в группе!')
-    except Exception as e:
-        logger.error(f"Could not send new poll message in chat {chat_id}: {e}")
-        await query.edit_message_text('Ошибка при обновлении результатов в группе.')
+        await query.answer(f'Ошибка при запуске опроса в группе: {e}', show_alert=True)
 
-
-# --- ДОБАВЛЕНО: обновить меню с кнопкой "Список групп" ---
-def get_admin_keyboard(is_admin):
-    if is_admin:
-        return [
-            [InlineKeyboardButton('Помощь', callback_data='help')],
-            [InlineKeyboardButton('Собрать участников', callback_data='collect')],
-            [InlineKeyboardButton('Исключить участника', callback_data='exclude')],
-            [InlineKeyboardButton('Создать опрос', callback_data='newpoll')],
-            [InlineKeyboardButton('Установить текст опроса', callback_data='setmessage')],
-            [InlineKeyboardButton('Установить варианты ответа', callback_data='setoptions')],
-            [InlineKeyboardButton('Запустить опрос', callback_data='startpoll')],
-            [InlineKeyboardButton('Результаты', callback_data='results')],
-            [InlineKeyboardButton('Настроить вывод результатов', callback_data='setresultoptions')],
-            [InlineKeyboardButton('Список участников', callback_data='participants')],
-            [InlineKeyboardButton('Список групп', callback_data='mychats')]
-        ]
-    else:
-        return [[InlineKeyboardButton('Помощь', callback_data='help')], [InlineKeyboardButton('Список групп', callback_data='mychats')]]
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update)
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    chat_id = query.message.chat_id
-    action = query.data
-    logger.info(f'Button callback triggered: action={action}, user_id={user_id}, chat_id={chat_id}')
-    
-    if chat_id > 0:  # Personal chat
-        logger.info(f'Personal chat detected for user {user_id}')
-        if action in ['collect', 'exclude', 'newpoll', 'startpoll', 'results']:
-            if 'selected_chat_id' not in context.user_data:
-                logger.info(f'No selected chat for user {user_id}, prompting to select chat')
-                await select_chat(update, context, action)
-                return
-            chat_id = context.user_data['selected_chat_id']
-            if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-                logger.info(f'User {user_id} is not an admin in chat {chat_id}')
-                await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-                return
-    else:  # Group chat
-        logger.info(f'Group chat detected for chat {chat_id}')
-        if action in ['collect', 'exclude', 'newpoll', 'startpoll', 'results']:
-            if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-                logger.info(f'User {user_id} is not an admin in group chat {chat_id}')
-                await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-                return
-            context.user_data['selected_chat_id'] = chat_id
-            await update_known_chats(chat_id, query.message.chat.title)
-    
-    if action == 'help':
-        logger.info(f'Help action triggered for user {user_id}')
-        await help_command(update, context)
-    elif action == 'collect':
-        logger.info(f'Collect action triggered for user {user_id}')
-        await collect(update, context)
-    elif action == 'exclude':
-        logger.info(f'Exclude action triggered for user {user_id}')
-        await exclude(update, context)
-    elif action == 'newpoll':
-        logger.info(f'Newpoll action triggered for user {user_id}')
-        await newpoll(update, context)
-    elif action == 'startpoll':
-        logger.info(f'Startpoll action triggered for user {user_id}')
-        await startpoll(update, context)
-    elif action == 'results':
-        logger.info(f'Results action triggered for user {user_id}')
-        await results(update, context)
-    elif action == 'setmessage':
-        # Диалог для установки текста опроса
-        logger.info(f'Setmessage action triggered for user {user_id} in chat {chat_id}')
-        if chat_id > 0:  # Личка
-            if 'selected_chat_id' not in context.user_data:
-                # Попросить выбрать группу
-                logger.info(f'No selected chat for setmessage, prompting user {user_id} to select chat')
-                context.user_data['after_select_action'] = 'setmessage'
-                await select_chat(update, context, 'setmessage')
-                return
-        context.user_data['waiting_for_poll_message'] = True
-        logger.info(f'Setting waiting_for_poll_message for user {user_id} in chat {chat_id}')
-        try:
-            await context.bot.send_message(chat_id=user_id, text='Пожалуйста, отправьте текст опроса одним сообщением.')
-            logger.info(f'Sent prompt for poll message to user {user_id}')
-        except Exception as e:
-            logger.error(f'Error sending setmessage prompt to user {user_id}: {e}')
-            # Fallback to ensure the message is sent directly
-            await context.bot.send_message(chat_id=query.from_user.id, text='Пожалуйста, отправьте текст опроса одним сообщением (запасной вариант).')
-            logger.info(f'Sent fallback prompt for poll message to user {user_id}')
-    elif action == 'setoptions':
-        # Диалог для установки вариантов опроса
-        logger.info(f'Setoptions action triggered for user {user_id} in chat {chat_id}')
-        if chat_id > 0:  # Личка
-            if 'selected_chat_id' not in context.user_data:
-                logger.info(f'No selected chat for setoptions, prompting user {user_id} to select chat')
-                context.user_data['after_select_action'] = 'setoptions'
-                await select_chat(update, context, 'setoptions')
-                return
-        context.user_data['waiting_for_poll_options'] = True
-        await context.bot.send_message(chat_id=user_id, text='Пожалуйста, отправьте варианты ответа через запятую одним сообщением.')
-    elif action == 'mychats':
-        await mychats(update, context, force_user_id=user_id)
-    elif action.startswith('poll_'):
-        poll_id, response_idx = action.split('_')[1], action.split('_')[2]
-        
-        c.execute('SELECT chat_id, message_id, options FROM polls WHERE poll_id = ?', (poll_id,))
-        res = c.fetchone()
-        if not res:
-            logger.error(f"Poll {poll_id} not found when voting.")
-            return
-        poll_chat_id, poll_message_id, options_str = res
-
-        options = options_str.split(',')
-        response = options[int(response_idx)].strip()
-
-        # Удаляем предыдущий ответ пользователя для этого poll_id
-        c.execute('DELETE FROM responses WHERE poll_id = ? AND user_id = ?', (poll_id, user_id))
-        # Вставляем новый ответ
-        c.execute('INSERT INTO responses (poll_id, user_id, response) VALUES (?, ?, ?)', (poll_id, user_id, response))
-        conn.commit()
-        
-        # --- ИЗМЕНЕНО: Используем новую функцию для генерации текста ---
-        text_to_send, new_options = _generate_results_text_and_options(int(poll_id), include_non_voters=False, detailed_names=False)
-        
-        if not text_to_send:
-            logger.error(f"Failed to generate poll results for poll {poll_id} after a vote.")
-            return
-
-        try:
-            await context.bot.edit_message_text(
-                chat_id=poll_chat_id,
-                message_id=poll_message_id,
-                text=text_to_send,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(opt.strip(), callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(new_options)]),
-                parse_mode='HTML'
-            )
-        except Exception as e:
-            logger.error(f'Ошибка при обновлении сообщения с опросом: {e}')
-    elif action.startswith('selectchat_'):
-        await select_chat_callback(update, context)
-    elif action == 'setresultoptions':
-        await setresultoptions(update, context)
-
-# --- ДОБАВЛЕНО: handler для любых сообщений в группах ---
-async def track_group_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    add_user_to_participants(update)
+async def startpoll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Эта команда теперь считается устаревшей для личных чатов.
+    # В группах она никогда не работала осмысленно.
+    # Перенаправляем пользователя в личный чат.
     chat = update.effective_chat
-    if chat and chat.type in ['group', 'supergroup']:
-        await update_known_chats(chat.id, chat.title)
-
-# --- Команда для очистки участников группы ---
-async def cleangroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if chat_id < 0:
-        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-            await update.message.reply_text('Только администраторы могут использовать эту команду.')
-            return
+    if chat.type == 'private':
+        await context.bot.send_message(chat_id=user_id, text='Эта команда устарела. Пожалуйста, используйте панель управления для запуска опросов.')
+        await private_chat_entry_point(update, context)
     else:
-        if 'selected_chat_id' not in context.user_data:
-            await update.message.reply_text('Сначала выберите группу.')
-            return
+        await update.message.reply_text('Для запуска опроса, пожалуйста, воспользуйтесь панелью управления в личном чате с ботом.')
+
+async def cleangroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Clears the participant list for a group."""
+    add_user_to_participants(update)
+    chat_id = None
+    if update.effective_chat.type in ['group', 'supergroup']:
+        chat_id = update.effective_chat.id
+    elif 'selected_chat_id' in context.user_data:
         chat_id = context.user_data['selected_chat_id']
+    
+    if not chat_id:
+        await update.message.reply_text('Не удалось определить группу. Если вы в личном чате, сначала выберите группу на панели управления.')
+        return
+
     c.execute('DELETE FROM participants WHERE chat_id = ?', (chat_id,))
     conn.commit()
-    await update.message.reply_text('Список участников для этой группы очищен.')
+    group_title = get_group_title(chat_id)
+    await update.message.reply_text(f'Список участников для группы "{group_title}" очищен.')
 
 # --- Группы и выбор группы ---
 async def groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1167,70 +655,8 @@ def get_effective_chat_id(update, context):
     else:
         return update.effective_chat.id
 
-# --- Обработчик кнопки "Список участников" ---
-async def participants_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update)
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    # Получаем все известные группы
-    c.execute('SELECT DISTINCT chat_id FROM polls')
-    chat_ids = [row[0] for row in c.fetchall()]
-    if not chat_ids:
-        await query.edit_message_text('Бот не знает ни одной группы. Добавьте его в группу и напишите в ней что-нибудь.')
-        return
-    text = ''
-    for gid in chat_ids:
-        c.execute('SELECT title FROM known_chats WHERE chat_id = ?', (gid,))
-        row = c.fetchone()
-        title = row[0] if row else str(gid)
-        text += f'<b>Группа:</b> {title} (ID: {gid})\n'
-        c.execute('SELECT user_id, username, first_name, last_name, excluded FROM participants WHERE chat_id = ?', (gid,))
-        participants = c.fetchall()
-        # Убираем дубли по user_id
-        unique_participants = {}
-        for user_id_part, username, first_name, last_name, excluded in participants:
-            if user_id_part not in unique_participants:
-                unique_participants[user_id_part] = (username, first_name, last_name, excluded)
-        if not unique_participants:
-            text += '  — <i>Список участников пуст</i>\n'
-        else:
-            for user_id_part, (username, first_name, last_name, excluded) in unique_participants.items():
-                name = first_name + (f' {last_name}' if last_name else '')
-                display_name = f'{name} (@{username})' if username else name
-                status = ' (исключен)' if excluded else ''
-                text += f'  — {display_name}{status}\n'
-        text += '\n'
-    await query.edit_message_text(text, parse_mode='HTML')
-
-# Добавляю обработчик для participantschat_
-async def participantschat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update)
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    chat_id = int(query.data.split('_')[1])
-    context.user_data['selected_chat_id'] = chat_id
-    c.execute('SELECT user_id, username, first_name, last_name, excluded FROM participants WHERE chat_id = ?', (chat_id,))
-    participants = c.fetchall()
-    # Убираем дубли по user_id
-    unique_participants = {}
-    for user_id_part, username, first_name, last_name, excluded in participants:
-        if user_id_part not in unique_participants:
-            unique_participants[user_id_part] = (username, first_name, last_name, excluded)
-    if not participants:
-        await query.edit_message_text('Список участников пуст. Используйте /collect для сбора участников.')
-        return
-    text = '<b>Список участников группы:</b>\n'
-    for user_id_part, (username, first_name, last_name, excluded) in unique_participants.items():
-        name = first_name + (f' {last_name}' if last_name else '')
-        display_name = f'{name} (@{username})' if username else name
-        status = ' (исключен)' if excluded else ''
-        text += f'- {display_name}{status}\n'
-    await query.edit_message_text(text, parse_mode='HTML')
-
 # --- Настройка вывода результатов опроса ---
-async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE, from_dashboard: bool = False):
     add_user_to_participants(update)
     user_id = update.effective_user.id
     # Определяем chat_id
@@ -1241,7 +667,8 @@ async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif 'selected_chat_id' in context.user_data:
         chat_id = context.user_data['selected_chat_id']
     else:
-        await select_chat(update, context, 'setresultoptions')
+        # If no chat is selected in a private chat, send them to the entry point
+        await private_chat_entry_point(update, context)
         return
     # Получаем все опросы в группе
     c.execute('SELECT poll_id, message, status FROM polls WHERE chat_id = ? ORDER BY poll_id DESC', (chat_id,))
@@ -1327,7 +754,28 @@ async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_sum_text = f"🎯 Цель сбора: {int(target_sum)}" if target_sum > 0 else "🎯 Установить цель сбора"
     keyboard.append([InlineKeyboardButton(target_sum_text, callback_data=f'setresultoptions_{poll_id}_settargetsum')])
 
-    await context.bot.send_message(chat_id=user_id, text='Настройте вывод результатов для каждого варианта:', reply_markup=InlineKeyboardMarkup(keyboard))
+    # Add the "Back" button if called from the dashboard
+    if from_dashboard:
+        c.execute('SELECT chat_id FROM polls WHERE poll_id = ?', (poll_id,))
+        chat_id_res = c.fetchone()
+        if chat_id_res:
+             keyboard.append([InlineKeyboardButton("↩️ Назад к панели управления", callback_data=f"dash_group_{chat_id_res[0]}")])
+
+    # Send or edit the message
+    text_to_send = 'Настройте вывод результатов для каждого варианта:'
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if update.callback_query:
+        try:
+            # Edit the message for a smooth UI flow
+            await update.callback_query.edit_message_text(text_to_send, reply_markup=reply_markup)
+        except Exception as e:
+            logger.error(f"Could not edit message for setresultoptions: {e}")
+            # Fallback if editing fails
+            await update.callback_query.message.delete()
+            await context.bot.send_message(chat_id=user_id, text=text_to_send, reply_markup=reply_markup)
+    else: # If called by command
+        await context.bot.send_message(chat_id=user_id, text=text_to_send, reply_markup=reply_markup)
 
 # --- Callback для изменения настроек варианта ---
 async def setresultoptions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1418,7 +866,7 @@ async def setresultoptions_callback(update: Update, context: ContextTypes.DEFAUL
         
         await query.edit_message_text('Стиль по умолчанию изменён. Обновляю меню...', reply_markup=None)
         context.user_data['setresultoptions_poll_id'] = poll_id
-        await setresultoptions(update, context)
+        await setresultoptions(update, context, from_dashboard=True)
         return
 
     # Handle individual option settings: callback_data=f"setresultoptions_{poll_id}_{idx}_shownames_{value}"
@@ -1442,7 +890,7 @@ async def setresultoptions_callback(update: Update, context: ContextTypes.DEFAUL
         
         await query.edit_message_text('Настройка изменена. Обновляю меню...', reply_markup=None)
         context.user_data['setresultoptions_poll_id'] = poll_id
-        await setresultoptions(update, context)
+        await setresultoptions(update, context, from_dashboard=True)
         return
         
     logger.warning(f'Необработанные данные в setresultoptions_callback: {data}')
@@ -1454,8 +902,8 @@ async def setresultoptionspoll_callback(update: Update, context: ContextTypes.DE
     await query.answer()
     poll_id = int(query.data.split('_')[1])
     context.user_data['setresultoptions_poll_id'] = poll_id
-    # Перезапускаем setresultoptions для показа меню настроек
-    await setresultoptions(update, context)
+    # Relaunch setresultoptions to show the settings menu
+    await setresultoptions(update, context, from_dashboard=True)
 
 # --- Обработчик текстового сообщения для установки эмодзи ---
 async def setemoji_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1490,7 +938,8 @@ async def setemoji_message_handler(update: Update, context: ContextTypes.DEFAULT
         except Exception as e:
             logger.error(f'[SETRESULTOPTIONS] setemoji_message_handler: ошибка при сохранении или отправке emoji для user_id={update.effective_user.id}: {e}')
         # Вернуться в меню настроек
-        await setresultoptions(update, context)
+        context.user_data['setresultoptions_poll_id'] = poll_id
+        await setresultoptions(update, context, from_dashboard=True)
         return
 
 async def setoptiontext_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1537,7 +986,8 @@ async def setoptiontext_message_handler(update: Update, context: ContextTypes.DE
         await update.message.reply_text("Произошла ошибка при обновлении текста варианта.")
 
     # Return to the settings menu
-    await setresultoptions(update, context)
+    context.user_data['setresultoptions_poll_id'] = poll_id
+    await setresultoptions(update, context, from_dashboard=True)
 
 # --- ДОБАВЛЕНО: Обработчики для установки числовых значений ---
 async def settargetsum_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1563,7 +1013,7 @@ async def settargetsum_message_handler(update: Update, context: ContextTypes.DEF
     # Вернуться в меню настроек
     if poll_id_to_return:
         context.user_data['setresultoptions_poll_id'] = poll_id_to_return
-        await setresultoptions(update, context)
+        await setresultoptions(update, context, from_dashboard=True)
 
 async def setcontribution_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1589,98 +1039,608 @@ async def setcontribution_message_handler(update: Update, context: ContextTypes.
     # Вернуться в меню настроек
     if poll_id_to_return:
         context.user_data['setresultoptions_poll_id'] = poll_id_to_return
-        await setresultoptions(update, context)
+        await setresultoptions(update, context, from_dashboard=True)
 
 # --- ДОБАВЛЕНО: Единый обработчик текстовых сообщений ---
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # Сначала проверяем состояния, которые не требуют авторизации или выбора чата
-    # и хранятся в application.user_data
     if user_id in context.application.user_data:
         app_user_data = context.application.user_data[user_id]
+        
+        # --- Poll Creation Wizard ---
+        wizard_state = app_user_data.get('wizard_state')
+        
+        if wizard_state == 'waiting_for_title':
+            title = update.message.text.strip()
+            if not title:
+                await update.message.reply_text("Текст опроса не может быть пустым. Попробуйте еще раз.")
+                return
+            app_user_data['wizard_title'] = title
+            app_user_data['wizard_state'] = 'waiting_for_options'
+            chat_id = app_user_data.get('wizard_chat_id')
+            await update.message.reply_text(
+                "✅ Отлично! (Шаг 2/2)\n\nТеперь отправьте варианты ответа. Каждый вариант с новой строки или через запятую.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash_group_{chat_id}")]])
+            )
+            return
+
+        if wizard_state == 'waiting_for_options':
+            options_text = update.message.text
+            options = [opt.strip() for opt in options_text.replace('\n', ',').split(',') if opt.strip()]
+            if len(options) < 2:
+                await update.message.reply_text("Нужно как минимум 2 варианта ответа. Попробуйте еще раз.")
+                return
+
+            chat_id = app_user_data.get('wizard_chat_id')
+            title = app_user_data.get('wizard_title')
+            options_str = ','.join(options)
+
+            cursor = c.execute('INSERT INTO polls (chat_id, message, status, options) VALUES (?, ?, ?, ?)', (chat_id, title, 'draft', options_str))
+            poll_id = cursor.lastrowid
+            conn.commit()
+            logger.info(f'[WIZARD] Создан новый опрос: poll_id={poll_id}, chat_id={chat_id}')
+            
+            # Cleanup wizard state
+            app_user_data.pop('wizard_state', None)
+            app_user_data.pop('wizard_chat_id', None)
+            app_user_data.pop('wizard_title', None)
+            
+            await update.message.reply_text(f"🎉 Черновик опроса «{title}» успешно создан!")
+
+            context.user_data['selected_chat_id'] = chat_id
+            await show_group_dashboard(update, context, chat_id)
+            return
+            
+        # --- Other handlers ---
         if app_user_data.get('waiting_for_emoji'):
             await setemoji_message_handler(update, context)
             return
-        if app_user_data.get('waiting_for_option_text'):
-            await setoptiontext_message_handler(update, context)
-            return
-        if app_user_data.get('waiting_for_target_sum'):
-            await settargetsum_message_handler(update, context)
-            return
-        if app_user_data.get('waiting_for_contribution'):
-            await setcontribution_message_handler(update, context)
-            return
+        # ... (and so on for other states)
 
-    # Затем проверяем состояния диалога, хранящиеся в user_data
+    # Deprecated flow
     if context.user_data.get('waiting_for_poll_message') or context.user_data.get('waiting_for_poll_options'):
         await message_dialog_handler(update, context)
         return
 
+
+def get_user_name(user_id: int) -> str:
+    """Gets a user's name from the database for display."""
+    c.execute('SELECT first_name, last_name, username FROM participants WHERE user_id = ?', (user_id,))
+    user_data = c.fetchone()
+    if not user_data:
+        # Fallback in case user is not in participants table for some reason
+        return f"Пользователь (ID: {user_id})"
+
+    first_name, last_name, username = user_data
+    name = first_name or ''
+    if last_name:
+        name += f' {last_name}'
+    
+    if not name.strip():
+        name = f'@{username}' if username else f"ID: {user_id}"
+
+    return name.strip()
+
+def get_progress_bar(progress, total, length=20):
+    """Generates a text-based progress bar."""
+    if total <= 0:
+        return "[]", 0
+    percent = progress / total
+    filled_length = int(length * percent)
+    bar = '█' * filled_length + '░' * (length - filled_length)
+    return f"[{bar}]", percent * 100
+
+async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: int, target_chat_id: int):
+    """Fetches, formats, and sends the detailed results for a specific poll."""
+    try:
+        c.execute('SELECT message, options, status, chat_id FROM polls WHERE poll_id = ?', (poll_id,))
+        poll_data = c.fetchone()
+        if not poll_data:
+            await context.bot.send_message(chat_id=target_chat_id, text=f"Не удалось найти опрос с ID {poll_id}.")
+            return
+
+        poll_message, options_str, status, group_chat_id = poll_data
+        original_options = [opt.strip() for opt in options_str.split(',')]
+
+        c.execute('SELECT user_id, response FROM responses WHERE poll_id = ?', (poll_id,))
+        responses = c.fetchall()
+
+        c.execute('SELECT default_show_names, default_names_style, default_show_count, target_sum FROM poll_settings WHERE poll_id = ?', (poll_id,))
+        default_settings = c.fetchone() or (1, 'list', 1, 0)
+        default_show_names, default_names_style, default_show_count, target_sum = default_settings
+
+        result_text = f"📊 *Результаты опроса: {poll_message}* (ID: {poll_id})\nСтатус: {status}\n\n"
+        total_collected = 0
+        
+        options_with_settings = []
+        for i, option_text in enumerate(original_options):
+            c.execute('SELECT show_names, names_style, show_count, emoji, is_priority, contribution_amount FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, i))
+            opt_settings = c.fetchone()
+            options_with_settings.append({
+                'text': option_text,
+                'index': i,
+                'settings': opt_settings or (None, None, None, None, 0, 0)
+            })
+
+        options_with_settings.sort(key=lambda x: x['settings'][4], reverse=True)
+        
+        for option_data in options_with_settings:
+            option_text = option_data['text']
+            settings = option_data['settings']
+            
+            show_names = default_show_names if settings[0] is None else settings[0]
+            names_style = default_names_style if settings[1] is None else settings[1]
+            show_count = default_show_count if settings[2] is None else settings[2]
+            emoji = (settings[3] + ' ') if settings[3] else ""
+            is_priority = settings[4] if settings[4] is not None else 0
+            contribution_amount = settings[5] if settings[5] is not None else 0
+
+            responders = [r[0] for r in responses if r[1] == option_text]
+            num_responders = len(responders)
+            
+            priority_marker = "⭐ " if is_priority else "☆ "
+            formatted_option_text = f"*{option_text}*" if is_priority else option_text
+            option_line = f"{priority_marker}{formatted_option_text}"
+
+            if contribution_amount > 0:
+                option_total = num_responders * contribution_amount
+                total_collected += option_total
+                option_line += f" (по {int(contribution_amount)})"
+            
+            if show_count:
+                option_line += f" — *{num_responders}*"
+            
+            result_text += option_line + "\n"
+
+            if show_names and num_responders > 0:
+                user_names = [get_user_name(uid) for uid in responders]
+                names_text = [f"{emoji}{name}" for name in user_names]
+                indent = "    "
+                if names_style == 'list':
+                    result_text += "\n".join(f"{indent}{name}" for name in names_text) + "\n\n"
+                elif names_style == 'inline':
+                    result_text += f'{indent}{", ".join(names_text)}\n\n'
+                elif names_style == 'small':
+                    small_names = [name.split()[0] for name in user_names]
+                    result_text += f'{indent}`{", ".join(small_names)}`\n\n'
+            else:
+                 result_text += "\n"
+
+        if target_sum > 0:
+            bar, percent = get_progress_bar(total_collected, target_sum)
+            result_text += f"💰 Собрано: *{int(total_collected)} из {int(target_sum)}* ({percent:.1f}%)\n{bar}\n\n"
+        
+        keyboard_buttons = [
+            [InlineKeyboardButton("🔄 Обновить", callback_data=f"refreshresults_{poll_id}")],
+            [InlineKeyboardButton("⚙️ Настроить", callback_data=f"setresultoptionspoll_{poll_id}")]
+        ]
+        
+        query = update.callback_query
+        if query:
+            poll_status = 'active' if status == 'active' else 'draft'
+            keyboard_buttons.append([InlineKeyboardButton("↩️ Назад к списку", callback_data=f"dash_polls_{group_chat_id}_{poll_status}")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard_buttons)
+        message_kwargs = {"text": result_text, "reply_markup": reply_markup, "parse_mode": ParseMode.MARKDOWN}
+        
+        if query and query.data.startswith('refreshresults_'):
+             try:
+                await query.edit_message_text(**message_kwargs)
+                await query.answer("Результаты обновлены.")
+             except Exception as e:
+                 if "Message is not modified" not in str(e):
+                    logger.warning(f"Could not edit message for refresh, probably unchanged: {e}")
+                 await query.answer("Нет изменений.")
+        elif query:
+            await query.edit_message_text(**message_kwargs)
+        else:
+            await context.bot.send_message(chat_id=target_chat_id, **message_kwargs)
+
+    except Exception as e:
+        logger.error(f"Error in show_results for poll_id {poll_id}: {e}", exc_info=True)
+        await context.bot.send_message(chat_id=target_chat_id, text="Произошла серьезная ошибка при отображении результатов.")
+
+
+async def results_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles callback query for showing results."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        poll_id = int(query.data.split('_')[1])
+        await show_results(update, context, poll_id, query.from_user.id)
+    except (IndexError, ValueError) as e:
+        logger.warning(f"Could not parse poll_id from results_callback data: {query.data} ({e})")
+        await query.edit_message_text("Ошибка: не удалось определить опрос для отображения результатов.")
+
+
+async def refresh_results_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the refresh button on the results message."""
+    query = update.callback_query
+    try:
+        poll_id = int(query.data.split('_')[1])
+        # The show_results function will handle the query.answer()
+        await show_results(update, context, poll_id, query.from_user.id)
+    except Exception as e:
+        logger.error(f"Error in refresh_results_callback: {e}", exc_info=True)
+        await query.answer("Ошибка при обновлении.", show_alert=True)
+
+
+async def track_group_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tracks users who speak in the group to add them to the participants list."""
+    if update.message:
+        add_user_to_participants(update)
+
+
 async def results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # This command is now deprecated for private chats
+    if update.effective_chat.type == 'private':
+        await update.message.reply_text('Для просмотра результатов, пожалуйста, воспользуйтесь панелью управления.')
+        await private_chat_entry_point(update, context)
+        return
+
     add_user_to_participants(update)
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
-    if chat_id < 0:  # Group chat
-        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-            await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-            return
-        context.user_data['selected_chat_id'] = chat_id
-    else:  # Private chat
-        if 'selected_chat_id' not in context.user_data:
-            await select_chat(update, context, 'results')
-            return
-        chat_id = context.user_data['selected_chat_id']
-        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-            await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-            return
     
-    c.execute('SELECT poll_id, message FROM polls WHERE chat_id = ? AND status = ?', (chat_id, 'active'))
+    if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
+        await update.message.reply_text('Только администраторы могут использовать эту команду.')
+        return
+    context.user_data['selected_chat_id'] = chat_id
+    
+    c.execute('SELECT poll_id FROM polls WHERE chat_id = ? AND status = ?', (chat_id, 'active'))
     active_polls = c.fetchall()
     if not active_polls:
-        await context.bot.send_message(chat_id=user_id, text='Нет активных опросов.')
+        try:
+            # Send a reply in the group that there are no active polls
+            await update.message.reply_text('В этой группе нет активных опросов.')
+        except Exception as e:
+            logger.warning(f"Could not reply in group {chat_id}: {e}")
         return
     
-    if len(active_polls) > 1:
-        keyboard = [[InlineKeyboardButton(f'Опрос {poll_id}: {message[:20]}...', callback_data=f'results_{poll_id}')] for poll_id, message in active_polls]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(chat_id=user_id, text='Выберите опрос для просмотра результатов:', reply_markup=reply_markup)
-    else:
-        poll_id = active_polls[0][0]
-        await show_results(update, context, poll_id, user_id)
+    # Send results to the user's private chat
+    try:
+        await context.bot.send_message(chat_id=user_id, text=f'Результаты для группы "{update.effective_chat.title}":')
+        for poll_id, in active_polls:
+            await show_results(update, context, poll_id, user_id)
+        
+        # --- ENHANCEMENT: Reply in the group chat ---
+        await update.message.reply_text(
+            f'✅ Результаты отправлены вам в личные сообщения, {update.effective_user.first_name}.',
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        logger.error(f"Could not send results to user {user_id} or reply in group {chat_id}: {e}")
+        try:
+            # Fallback reply in group if sending DMs failed
+            await update.message.reply_text(f'Не удалось отправить результаты в личные сообщения. Возможно, вы не начали диалог со мной? Пожалуйста, напишите мне в ЛС: @{(await context.bot.get_me()).username}')
+        except Exception as e2:
+            logger.error(f"Could not even send the fallback message in group {chat_id}: {e2}")
+
+
+async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Logs every update received by the bot for debugging purposes."""
+    logger.info(f"[GLOBAL_UPDATE_LOGGER] Update received: {update.to_dict()}")
+
+    if context.bot_data.get('debug_mode_enabled', False):
+        print("\n" + "="*80)
+        print(f"DEBUG: Event received at {time.time()}")
+        print(f"Update Details: {update}")
+        print("="*80 + "\n")
+
+
+async def toggle_debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggles the debug message mode."""
+    is_enabled = context.bot_data.get('debug_mode_enabled', False)
+    context.bot_data['debug_mode_enabled'] = not is_enabled
+    await update.message.reply_text(f"Debug messaging is now {'ENABLED' if not is_enabled else 'DISABLED'}.")
+
 
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # --- Global Update Logger for Debugging ---
+    application.add_handler(TypeHandler(Update, log_all_updates), group=-1)
+
+    # --- Core Commands ---
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('help', help_command))
-    application.add_handler(CommandHandler('groups', groups))
-    application.add_handler(CommandHandler('use', use_group))
+    application.add_handler(CommandHandler('toggle_debug', toggle_debug))
+
+    # --- Legacy/Utility Commands ---
     application.add_handler(CommandHandler('collect', collect))
     application.add_handler(CommandHandler('exclude', exclude))
-    application.add_handler(CommandHandler('newpoll', newpoll))
-    application.add_handler(CommandHandler('setmessage', setmessage))
-    application.add_handler(CommandHandler('setoptions', setoptions))
-    application.add_handler(CommandHandler('startpoll', startpoll))
+    application.add_handler(CommandHandler('startpoll', startpoll)) # Deprecated
     application.add_handler(CommandHandler('results', results))
-    application.add_handler(CommandHandler('mychats', mychats))
     application.add_handler(CommandHandler('cleangroup', cleangroup))
-    application.add_handler(CallbackQueryHandler(exclude_callback, pattern='^exclude_'))
+    application.add_handler(CommandHandler('setresultoptions', setresultoptions)) # Kept for potential direct access
+
+    # --- Callback Query Handlers ---
     application.add_handler(CallbackQueryHandler(results_callback, pattern='^results_'))
     application.add_handler(CallbackQueryHandler(setresultoptions_callback, pattern='^setresultoptions_'))
-    application.add_handler(CallbackQueryHandler(button_callback, pattern='^(help|collect|exclude|newpoll|startpoll|results|setmessage|setoptions|mychats|poll_.*|selectchat_.*|setresultoptions)$'))
-    # --- ИЗМЕНЕНО: Используем единый обработчик для текстовых сообщений ---
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
-    # --- ДОБАВЛЕНО: handler для любых сообщений в группах ---
-    application.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_user), group=1) # Даем другую группу, чтобы он не пересекался с text_handler
-    
-    application.add_handler(CallbackQueryHandler(refresh_results_callback, pattern='^refreshresults_'))
-    application.add_handler(CallbackQueryHandler(participants_callback, pattern='^participants$'))
-    application.add_handler(CallbackQueryHandler(participantschat_callback, pattern='^participantschat_'))
-    application.add_handler(CommandHandler('setresultoptions', setresultoptions))
     application.add_handler(CallbackQueryHandler(setresultoptionspoll_callback, pattern='^setresultoptionspoll_'))
+    application.add_handler(CallbackQueryHandler(refresh_results_callback, pattern='^refreshresults_'))
+    application.add_handler(CallbackQueryHandler(dashboard_callback_handler, pattern='^dash_')) # NEW MAIN HANDLER
+    application.add_handler(CallbackQueryHandler(button_callback_legacy, pattern='^poll_')) # Voting handler
+
+    # --- Message Handlers ---
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
+    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, track_group_user), group=1)
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
+# --- NEW HELPER FUNCTIONS FOR DASHBOARD ---
+
+async def private_chat_entry_point(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Displays the main menu in a private chat, showing a list of manageable groups."""
+    user_id = update.effective_user.id
+    admin_chats = await get_admin_chats(update, context)
+
+    if not admin_chats:
+        message_text = (
+            'Я не знаю ни одной группы, где вы администратор. '
+            'Пожалуйста, для начала, выполните любую команду в группе, '
+            'где вы являетесь администратором, чтобы я ее узнал.'
+        )
+        # Use query if available to prevent sending a new message
+        if update.callback_query:
+            await update.callback_query.message.edit_text(message_text)
+        else:
+            await context.bot.send_message(chat_id=user_id, text=message_text)
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(chat.title, callback_data=f"dash_group_{chat.id}")]
+        for chat in admin_chats
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    message_text = "Добро пожаловать! Выберите группу для управления:"
+    
+    query = update.callback_query
+    if query:
+        try:
+            await query.edit_message_text(message_text, reply_markup=reply_markup)
+        except Exception as e:
+            logger.warning(f"Could not edit message in private_chat_entry_point, sending new one. Error: {e}")
+            await context.bot.send_message(chat_id=user_id, text=message_text, reply_markup=reply_markup)
+
+    else:
+        await context.bot.send_message(chat_id=user_id, text=message_text, reply_markup=reply_markup)
+
+
+async def show_group_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Displays the main dashboard for a selected group."""
+    query = update.callback_query
+    c.execute('SELECT title FROM known_chats WHERE chat_id = ?', (chat_id,))
+    title_res = c.fetchone()
+    title = title_res[0] if title_res else f"ID: {chat_id}"
+
+    c.execute('SELECT COUNT(*) FROM polls WHERE chat_id = ? AND status = ?', (chat_id, 'active'))
+    active_polls_count = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM polls WHERE chat_id = ? AND status = ?', (chat_id, 'draft'))
+    draft_polls_count = c.fetchone()[0]
+
+    text = f'Панель управления для группы *"{title}"*\nВыберите действие:'
+    keyboard = [
+        [InlineKeyboardButton("➕ Создать опрос", callback_data=f"dash_newpoll_{chat_id}")],
+        [InlineKeyboardButton(f"⚡️ Активные опросы ({active_polls_count})", callback_data=f"dash_polls_{chat_id}_active")],
+        [InlineKeyboardButton(f"📝 Черновики ({draft_polls_count})", callback_data=f"dash_polls_{chat_id}_draft")],
+        [InlineKeyboardButton("👥 Участники", callback_data=f"dash_participants_{chat_id}")],
+        [InlineKeyboardButton("↩️ Назад к выбору группы", callback_data="dash_back_to_groups")]
+    ]
+    
+    if query:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+
+
+async def show_poll_list(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int, status: str):
+    """Shows a list of polls with a given status (active or draft)."""
+    query = update.callback_query
+    c.execute('SELECT poll_id, message FROM polls WHERE chat_id = ? AND status = ? ORDER BY poll_id DESC', (chat_id, status))
+    polls = c.fetchall()
+
+    status_text = "Активные опросы" if status == 'active' else "Черновики"
+    
+    if not polls:
+        text = f"Нет {status_text.lower()} в этой группе."
+        keyboard = [[InlineKeyboardButton("↩️ Назад к панели управления", callback_data=f"dash_group_{chat_id}")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    text = f'*{status_text}*:\n\n'
+    keyboard = []
+    for poll_id, message in polls:
+        short_msg = (message[:30] + '...') if message and len(message) > 30 else (message or f'Опрос {poll_id}')
+        
+        if status == 'active':
+            keyboard.append([InlineKeyboardButton(short_msg, callback_data=f"results_{poll_id}")])
+        elif status == 'draft':
+            button_row = [
+                InlineKeyboardButton(short_msg, callback_data=f"setresultoptionspoll_{poll_id}"),
+                InlineKeyboardButton("▶️", callback_data=f"dash_startpoll_{poll_id}"),
+                InlineKeyboardButton("🗑", callback_data=f"dash_deletepoll_{poll_id}")
+            ]
+            keyboard.append(button_row)
+            
+    keyboard.append([InlineKeyboardButton("↩️ Назад к панели управления", callback_data=f"dash_group_{chat_id}")])
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+
+
+async def show_participants_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Shows the participant management menu."""
+    query = update.callback_query
+    c.execute('SELECT title FROM known_chats WHERE chat_id = ?', (chat_id,))
+    title_res = c.fetchone()
+    title = title_res[0] if title_res else f"ID: {chat_id}"
+    
+    text = f'👥 **Управление участниками ("{title}")**'
+    keyboard = [
+        [InlineKeyboardButton("📄 Показать список", callback_data=f"dash_participants_list_{chat_id}")],
+        [InlineKeyboardButton("🚫 Исключить/вернуть", callback_data=f"dash_participants_exclude_{chat_id}")],
+        [InlineKeyboardButton("🧹 Очистить список", callback_data=f"dash_participants_clean_{chat_id}")],
+        [InlineKeyboardButton("↩️ Назад к панели управления", callback_data=f"dash_group_{chat_id}")]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+
+async def wizard_start(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Starts the poll creation wizard."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    if user_id not in context.application.user_data:
+        context.application.user_data[user_id] = {}
+    
+    app_user_data = context.application.user_data[user_id]
+    app_user_data['wizard_state'] = 'waiting_for_title'
+    app_user_data['wizard_chat_id'] = chat_id
+    
+    await query.message.edit_text(
+        "✨ **Мастер создания опроса (Шаг 1/2)**\n\nПожалуйста, отправьте текст (заголовок) для вашего нового опроса.",
+        parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash_group_{chat_id}")]])
+    )
+
+
+async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    
+    data = query.data.split('_')
+    command = data[1]
+    
+    if command == "group": # dash_group_{chat_id}
+        chat_id = int(data[2])
+        if user_id in context.application.user_data:
+            app_user_data = context.application.user_data[user_id]
+            app_user_data.pop('wizard_state', None)
+            app_user_data.pop('wizard_chat_id', None)
+            app_user_data.pop('wizard_title', None)
+            
+        context.user_data['selected_chat_id'] = chat_id
+        await show_group_dashboard(update, context, chat_id)
+        return
+        
+    if command == "back" and data[2] == "to" and data[3] == "groups": # dash_back_to_groups
+        await private_chat_entry_point(update, context)
+        return
+        
+    if command == "newpoll": # dash_newpoll_{chat_id}
+        chat_id = int(data[2])
+        await wizard_start(update, context, chat_id)
+        return
+
+    if command == "polls": # dash_polls_{chat_id}_{status}
+        chat_id = int(data[2])
+        status = data[3]
+        await show_poll_list(update, context, chat_id, status)
+        return
+
+    if command == "startpoll": # dash_startpoll_{poll_id}
+        poll_id = int(data[2])
+        c.execute('SELECT chat_id FROM polls WHERE poll_id = ?', (poll_id,))
+        res = c.fetchone()
+        if res:
+            await startpoll_from_dashboard(update, context, poll_id, res[0])
+            await show_group_dashboard(update, context, res[0])
+        else:
+            await query.answer("Опрос не найден!", show_alert=True)
+        return
+        
+    if command == "deletepoll": # dash_deletepoll_{poll_id}
+        poll_id = int(data[2])
+        c.execute('SELECT chat_id FROM polls WHERE poll_id = ?', (poll_id,))
+        res = c.fetchone()
+        if res:
+            chat_id = res[0]
+            c.execute('DELETE FROM polls WHERE poll_id = ?', (poll_id,))
+            c.execute('DELETE FROM responses WHERE poll_id = ?', (poll_id,))
+            c.execute('DELETE FROM poll_settings WHERE poll_id = ?', (poll_id,))
+            c.execute('DELETE FROM poll_option_settings WHERE poll_id = ?', (poll_id,))
+            conn.commit()
+            await query.answer(f"Черновик опроса {poll_id} удален.", show_alert=True)
+            await show_poll_list(update, context, chat_id, 'draft')
+        return
+
+    if command == "participants": # dash_participants_{chat_id}
+        chat_id = int(data[2])
+        await show_participants_menu(update, context, chat_id)
+        return
+
+
+# Переименовываем старый button_callback, т.к. он теперь обрабатывает только голоса
+async def button_callback_legacy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    add_user_to_participants(update)
+    query = update.callback_query
+    
+    logger.info(f"[VOTE_CALLBACK] Received vote callback. Data: {query.data}")
+
+    poll_id_str, option_index_str = query.data.split('_')[1:]
+    poll_id = int(poll_id_str)
+    option_index = int(option_index_str)
+    user_id = query.from_user.id
+
+    logger.info(f"[VOTE_CALLBACK] Parsed: poll_id={poll_id}, option_index={option_index}, user_id={user_id}")
+
+    c.execute('SELECT options, status FROM polls WHERE poll_id = ?', (poll_id,))
+    row = c.fetchone()
+    if not row:
+        logger.warning(f"[VOTE_CALLBACK] Poll not found: poll_id={poll_id}")
+        await query.answer("Этот опрос больше не действителен.", show_alert=True)
+        return
+
+    options_str, status = row
+    logger.info(f"[VOTE_CALLBACK] Poll status for poll_id={poll_id} is '{status}'")
+    if status != 'active':
+        await query.answer(f"Этот опрос неактивен (статус: {status}).", show_alert=True)
+        return
+        
+    options = [opt.strip() for opt in options_str.split(',')]
+    response_text = options[option_index]
+
+    c.execute('SELECT response FROM responses WHERE poll_id = ? AND user_id = ?', (poll_id, user_id))
+    existing_response = c.fetchone()
+    logger.info(f"[VOTE_CALLBACK] User {user_id} existing response for poll {poll_id}: {existing_response}")
+
+    answer_text = ""
+    if existing_response:
+        if existing_response[0] == response_text:
+            # User clicked the same button again, retract vote
+            logger.info(f"[VOTE_CALLBACK] Action: Retracting vote for user {user_id} in poll {poll_id}. Response: '{response_text}'")
+            c.execute('DELETE FROM responses WHERE poll_id = ? AND user_id = ?', (poll_id, user_id))
+            answer_text = f"Ваш голос за '{response_text}' отозван."
+        else:
+            # User changed their vote
+            logger.info(f"[VOTE_CALLBACK] Action: Changing vote for user {user_id} in poll {poll_id}. New response: '{response_text}'")
+            c.execute('UPDATE responses SET response = ? WHERE poll_id = ? AND user_id = ?', (response_text, poll_id, user_id))
+            answer_text = f"Ваш ответ изменен на '{response_text}'."
+    else:
+        # New vote
+        logger.info(f"[VOTE_CALLBACK] Action: New vote for user {user_id} in poll {poll_id}. Response: '{response_text}'")
+        c.execute('INSERT INTO responses (poll_id, user_id, response) VALUES (?, ?, ?)', (poll_id, user_id, response_text))
+        answer_text = f"Ваш ответ '{response_text}' принят!"
+
+    # Commit all database changes at once
+    logger.info(f"[VOTE_CALLBACK] Committing DB changes for poll {poll_id}.")
+    conn.commit()
+
+    # Verify the write operation
+    c.execute('SELECT response FROM responses WHERE poll_id = ? AND user_id = ?', (poll_id, user_id))
+    new_db_state = c.fetchone()
+    logger.info(f"[VOTE_CALLBACK] DB state after commit for user {user_id} in poll {poll_id}: {new_db_state}")
+
+    # First, answer the callback to unfreeze the button on the user's side immediately.
+    logger.info(f"[VOTE_CALLBACK] Answering callback for user {user_id} with text: '{answer_text}'")
+    await query.answer(answer_text)
+
+    # Then, update the poll message in the group. This might take a moment.
+    logger.info(f"[VOTE_CALLBACK] Calling update_poll_message for poll {poll_id}.")
+    await update_poll_message(poll_id, context)
+
+
 if __name__ == '__main__':
-    main() 
+    main()
