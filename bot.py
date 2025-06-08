@@ -68,6 +68,12 @@ try:
     conn.commit()
 except Exception:
     pass  # поле уже есть
+
+try:
+    c.execute('ALTER TABLE polls ADD COLUMN message_id INTEGER')
+    conn.commit()
+except Exception:
+    pass # поле уже есть
 conn.commit()
 
 # --- ДОБАВЛЕНО: функция для добавления пользователя в participants ---
@@ -678,6 +684,7 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
         
     c.execute('SELECT p.user_id, p.username, p.first_name, p.last_name, r.response FROM participants p LEFT JOIN responses r ON p.user_id = r.user_id AND r.poll_id = ? WHERE p.chat_id = ? AND p.excluded = 0', (poll_id, chat_id))
     responses = c.fetchall()
+    logger.info(f'[SHOW_RESULTS] Найдено {len(responses)} участников для опроса {poll_id} в чате {chat_id}.')
     
     # Подсчет количества проголосовавших
     voted_count = sum(1 for row in responses if row[4])
@@ -690,23 +697,26 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
     else:
         poll_message = f'Опрос {poll_id}'
         options = []
-    # Собираем по вариантам: user_id, имя
+    # Собираем по вариантам: user_id, имя, username
     option_voters = {opt: set() for opt in options}
     all_voted_user_ids = set()
     for user_id_part, username, first_name, last_name, response in responses:
         if response:
             name = first_name + (f' {last_name}' if last_name else '')
-            option_voters[response].add((user_id_part, name))
+            option_voters[response].add((user_id_part, name, username))
             all_voted_user_ids.add(user_id_part)
+
     # Сортируем варианты по числу голосов (убывание)
     sorted_options = sorted(options, key=lambda o: len(option_voters[o]), reverse=True)
     max_votes = max((len(option_voters[o]) for o in options), default=0)
+    
     # Список не проголосовавших (только уникальные user_id)
     not_voted_dict = {}
     for user_id_part, username, first_name, last_name, response in responses:
         if not response and user_id_part not in not_voted_dict:
-            not_voted_dict[user_id_part] = first_name + (f' {last_name}' if last_name else '')
-    not_voted = list(not_voted_dict.values())
+            name = first_name + (f' {last_name}' if last_name else '')
+            not_voted_dict[user_id_part] = (name, username)
+    logger.info(f'[SHOW_RESULTS] Список не проголосовавших ({len(not_voted_dict)}): {not_voted_dict}')
 
     # --- Получаем настройки ---
     c.execute('SELECT default_show_names, default_names_style, default_show_count FROM poll_settings WHERE poll_id = ?', (poll_id,))
@@ -724,28 +734,34 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
         emoji = opt_settings[3] if opt_settings and opt_settings[3] else ''
         is_priority = opt_settings[4] if opt_settings and opt_settings[4] else 0
         logger.info(f'[RESULTS] Вариант {idx} ({opt}): применяемые настройки: show_names={show_names}, names_style={names_style}, show_count={show_count}, emoji={emoji}, is_priority={is_priority}')
+        
         voters = option_voters[opt]
         # Итоговая строка
         if show_count:
             result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt}</b>: <b>{len(voters)}</b>'
         else:
             result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt}</b>:'
+            
         # Список проголосовавших
         if show_names and voters:
+            sorted_voters = sorted(list(voters), key=lambda x: x[1])
             if names_style == 'inline':
-                names = ', '.join(f'{emoji} {n}' if emoji else n for _, n in sorted(voters))
+                names = ', '.join(f'{emoji} {n}{f" (@{u})" if u else ""}' if emoji else f'{n}{f" (@{u})" if u else ""}' for _, n, u in sorted_voters)
                 result_text += f' — {names}'
             elif names_style == 'small':
-                for _, n in sorted(voters):
-                    result_text += f'\n    <i>{f"{emoji} {n}" if emoji else f"{n}"}</i>'
+                for _, n, u in sorted_voters:
+                    result_text += f'\n    <i>{f"{emoji} {n}" if emoji else f"{n}"}{f" (@{u})" if u else ""}</i>'
             else:  # list
-                for _, n in sorted(voters):
-                    result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}'
-    if not_voted:
+                for _, n, u in sorted_voters:
+                    result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}{f" (@{u})" if u else ""}'
+
+    if not_voted_dict:
         result_text += '\n\n<b>Не проголосовали:</b>\n'
-        for n in not_voted:
-            result_text += f'{n}\n'
-    # Кнопка обновления результатов
+        sorted_not_voted = sorted(list(not_voted_dict.values()), key=lambda x: x[0])
+        for n, u in sorted_not_voted:
+            result_text += f'{n}{f" (@{u})" if u else ""}\n'
+            
+    # Кнопка обновления результатов в группе
     keyboard = [[InlineKeyboardButton('🔄 Обновить результаты в группе', callback_data=f'refreshresults_{poll_id}')]]
     await context.bot.send_message(chat_id=user_id, text=result_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -783,7 +799,7 @@ async def refresh_results_callback(update: Update, context: ContextTypes.DEFAULT
     for user_id_part, username, first_name, last_name, response in responses:
         if response:
             name = first_name + (f' {last_name}' if last_name else '')
-            option_voters[response].add((user_id_part, name))
+            option_voters[response].add((user_id_part, name, username))
             all_voted_user_ids.add(user_id_part)
     sorted_options = sorted(options, key=lambda o: len(option_voters[o]), reverse=True)
     # --- Получаем настройки ---
@@ -807,15 +823,16 @@ async def refresh_results_callback(update: Update, context: ContextTypes.DEFAULT
         else:
             result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt}</b>:'
         if show_names and voters:
+            sorted_voters = sorted(list(voters), key=lambda x: x[1])
             if names_style == 'inline':
-                names = ', '.join(f'{emoji} {n}' if emoji else n for _, n in sorted(voters))
+                names = ', '.join(f'{emoji} {n}{f" (@{u})" if u else ""}' if emoji else f'{n}{f" (@{u})" if u else ""}' for _, n, u in sorted_voters)
                 result_text += f' — {names}'
             elif names_style == 'small':
-                for _, n in sorted(voters):
-                    result_text += f'\n    <i>{f"{emoji} {n}" if emoji else f"{n}"}</i>'
-            else:
-                for _, n in sorted(voters):
-                    result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}'
+                for _, n, u in sorted_voters:
+                    result_text += f'\n    <i>{f"{emoji} {n}" if emoji else f"{n}"}{f" (@{u})" if u else ""}</i>'
+            else:  # list
+                for _, n, u in sorted_voters:
+                    result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}{f" (@{u})" if u else ""}'
     # Отправляем новое сообщение в группу (тихо) с кнопками голосования
     poll_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(opt, callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)])
     new_msg = await context.bot.send_message(chat_id=chat_id, text=result_text, parse_mode='HTML', disable_notification=True, reply_markup=poll_keyboard)
