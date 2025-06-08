@@ -52,11 +52,19 @@ c.execute('''CREATE TABLE IF NOT EXISTS poll_option_settings (
     names_style TEXT DEFAULT NULL,
     show_count INTEGER DEFAULT NULL,
     emoji TEXT DEFAULT NULL,
+    is_priority INTEGER DEFAULT 0,
     PRIMARY KEY (poll_id, option_index)
 )''')
 # --- ДОБАВЛЕНО: добавляем поле emoji, если его нет ---
 try:
     c.execute('ALTER TABLE poll_option_settings ADD COLUMN emoji TEXT')
+    conn.commit()
+except Exception:
+    pass  # поле уже есть
+
+# --- ДОБАВЛЕНО: добавляем поле is_priority, если его нет ---
+try:
+    c.execute('ALTER TABLE poll_option_settings ADD COLUMN is_priority INTEGER DEFAULT 0')
     conn.commit()
 except Exception:
     pass  # поле уже есть
@@ -707,20 +715,21 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
     # Формируем красивый HTML-результат
     result_text = f'<b>📊 {poll_message}</b>\n\n<b>Результаты</b> <i>(👥 {len(all_voted_user_ids)})</i>:'
     for idx, opt in enumerate(sorted_options):
-        c.execute('SELECT show_names, names_style, show_count, emoji FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, options.index(opt)))
+        c.execute('SELECT show_names, names_style, show_count, emoji, is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, options.index(opt)))
         opt_settings = c.fetchone()
         logger.info(f'[RESULTS] Вариант {idx} ({opt}): индивидуальные настройки: {opt_settings}')
         show_names = default_settings[0] if opt_settings is None or opt_settings[0] is None else opt_settings[0]
         names_style = default_settings[1] if opt_settings is None or opt_settings[1] is None else opt_settings[1]
         show_count = default_settings[2] if opt_settings is None or opt_settings[2] is None else opt_settings[2]
         emoji = opt_settings[3] if opt_settings and opt_settings[3] else ''
-        logger.info(f'[RESULTS] Вариант {idx} ({opt}): применяемые настройки: show_names={show_names}, names_style={names_style}, show_count={show_count}, emoji={emoji}')
+        is_priority = opt_settings[4] if opt_settings and opt_settings[4] else 0
+        logger.info(f'[RESULTS] Вариант {idx} ({opt}): применяемые настройки: show_names={show_names}, names_style={names_style}, show_count={show_count}, emoji={emoji}, is_priority={is_priority}')
         voters = option_voters[opt]
         # Итоговая строка
         if show_count:
-            result_text += f'\n<b>• {opt}</b>: <b>{len(voters)}</b>'
+            result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt}</b>: <b>{len(voters)}</b>'
         else:
-            result_text += f'\n<b>• {opt}</b>:'
+            result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt}</b>:'
         # Список проголосовавших
         if show_names and voters:
             if names_style == 'inline':
@@ -728,14 +737,14 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
                 result_text += f' — {names}'
             elif names_style == 'small':
                 for _, n in sorted(voters):
-                    result_text += f'\n    <i>{emoji + " " if emoji else ""}— {n}</i>'
+                    result_text += f'\n    <i>{f"{emoji} {n}" if emoji else f"{n}"}</i>'
             else:  # list
                 for _, n in sorted(voters):
-                    result_text += f'\n    {emoji + " " if emoji else ""}— {n}'
+                    result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}'
     if not_voted:
         result_text += '\n\n<b>Не проголосовали:</b>\n'
         for n in not_voted:
-            result_text += f'— {n}\n'
+            result_text += f'{n}\n'
     # Кнопка обновления результатов
     keyboard = [[InlineKeyboardButton('🔄 Обновить результаты в группе', callback_data=f'refreshresults_{poll_id}')]]
     await context.bot.send_message(chat_id=user_id, text=result_text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
@@ -783,29 +792,30 @@ async def refresh_results_callback(update: Update, context: ContextTypes.DEFAULT
     logger.info(f'[RESULTS] Формирование результатов для poll_id={poll_id}. Настройки по умолчанию: {default_settings}')
     result_text = f'<b>📊 {poll_message}</b>\n\n<b>Результаты</b> <i>(👥 {len(all_voted_user_ids)})</i>:'
     for idx, opt in enumerate(sorted_options):
-        c.execute('SELECT show_names, names_style, show_count, emoji FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, options.index(opt)))
+        c.execute('SELECT show_names, names_style, show_count, emoji, is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, options.index(opt)))
         opt_settings = c.fetchone()
         logger.info(f'[RESULTS] Вариант {idx} ({opt}): индивидуальные настройки: {opt_settings}')
         show_names = default_settings[0] if opt_settings is None or opt_settings[0] is None else opt_settings[0]
         names_style = default_settings[1] if opt_settings is None or opt_settings[1] is None else opt_settings[1]
         show_count = default_settings[2] if opt_settings is None or opt_settings[2] is None else opt_settings[2]
         emoji = opt_settings[3] if opt_settings and opt_settings[3] else ''
-        logger.info(f'[RESULTS] Вариант {idx} ({opt}): применяемые настройки: show_names={show_names}, names_style={names_style}, show_count={show_count}, emoji={emoji}')
+        is_priority = opt_settings[4] if opt_settings and opt_settings[4] else 0
+        logger.info(f'[RESULTS] Вариант {idx} ({opt}): применяемые настройки: show_names={show_names}, names_style={names_style}, show_count={show_count}, emoji={emoji}, is_priority={is_priority}')
         voters = option_voters[opt]
         if show_count:
-            result_text += f'\n<b>• {opt}</b>: <b>{len(voters)}</b>'
+            result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt}</b>: <b>{len(voters)}</b>'
         else:
-            result_text += f'\n<b>• {opt}</b>:'
+            result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt}</b>:'
         if show_names and voters:
             if names_style == 'inline':
                 names = ', '.join(f'{emoji} {n}' if emoji else n for _, n in sorted(voters))
                 result_text += f' — {names}'
             elif names_style == 'small':
                 for _, n in sorted(voters):
-                    result_text += f'\n    <i>{emoji + " " if emoji else ""}— {n}</i>'
+                    result_text += f'\n    <i>{f"{emoji} {n}" if emoji else f"{n}"}</i>'
             else:
                 for _, n in sorted(voters):
-                    result_text += f'\n    {emoji + " " if emoji else ""}— {n}'
+                    result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}'
     # Отправляем новое сообщение в группу (тихо) с кнопками голосования
     poll_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(opt, callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)])
     new_msg = await context.bot.send_message(chat_id=chat_id, text=result_text, parse_mode='HTML', disable_notification=True, reply_markup=poll_keyboard)
@@ -948,18 +958,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         for idx, opt in enumerate(options):
             opt_clean = opt.strip()
             unique_voters = names[opt_clean]
-            c.execute('SELECT show_names, names_style, show_count, emoji FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, idx))
+            c.execute('SELECT show_names, names_style, show_count, emoji, is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, idx))
             opt_settings = c.fetchone()
             
             show_names = default_settings[0] if opt_settings is None or opt_settings[0] is None else opt_settings[0]
             names_style = default_settings[1] if opt_settings is None or opt_settings[1] is None else opt_settings[1]
             show_count = default_settings[2] if opt_settings is None or opt_settings[2] is None else opt_settings[2]
             emoji = opt_settings[3] if opt_settings and opt_settings[3] else ''
+            is_priority = opt_settings[4] if opt_settings and opt_settings[4] else 0
             
             if show_count:
-                result_text += f'\n<b>• {opt_clean}</b>: <b>{len(unique_voters)}</b>'
+                result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt_clean}</b>: <b>{len(unique_voters)}</b>'
             else:
-                result_text += f'\n<b>• {opt_clean}</b>:'
+                result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt_clean}</b>:'
                 
             if show_names and unique_voters:
                 if names_style == 'inline':
@@ -967,10 +978,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     result_text += f' — {names_str}'
                 elif names_style == 'small':
                     for _, n in sorted(unique_voters):
-                        result_text += f'\n    <i>{emoji + " " if emoji else ""}— {n}</i>'
+                        result_text += f'\n    <i>{f"{emoji} {n}" if emoji else f"{n}"}</i>'
                 else:
                     for _, n in sorted(unique_voters):
-                        result_text += f'\n    {emoji + " " if emoji else ""}— {n}'
+                        result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}'
         text_to_send = result_text
         try:
             await context.bot.edit_message_text(
@@ -1176,13 +1187,14 @@ async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Формируем меню для каждого варианта
     keyboard = []
     for idx, opt in enumerate(options):
-        c.execute('SELECT show_names, names_style, show_count, emoji FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, idx))
+        c.execute('SELECT show_names, names_style, show_count, emoji, is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, idx))
         opt_settings = c.fetchone()
         logger.info(f'[SETRESULTOPTIONS] Вариант {idx} ({opt}): индивидуальные настройки: {opt_settings}')
         show_names = default_settings[0] if opt_settings is None or opt_settings[0] is None else opt_settings[0]
         names_style = default_settings[1] if opt_settings is None or opt_settings[1] is None else opt_settings[1]
         show_count = default_settings[2] if opt_settings is None or opt_settings[2] is None else opt_settings[2]
         emoji = opt_settings[3] if opt_settings and opt_settings[3] else None
+        is_priority = opt_settings[4] if opt_settings and opt_settings[4] else 0
         btns = [
             InlineKeyboardButton(f"Показывать имена: {'✅' if show_names else '❌'}", callback_data=f"setresultoptions_{poll_id}_{idx}_shownames_{1 if not show_names else 0}"),
             InlineKeyboardButton(f"Показывать итог: {'✅' if show_count else '❌'}", callback_data=f"setresultoptions_{poll_id}_{idx}_showcount_{1 if not show_count else 0}")
@@ -1194,10 +1206,14 @@ async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         emoji_btn_text = f"Смайлик: {emoji} (сменить)" if emoji else "Установить смайлик"
         emoji_btn = InlineKeyboardButton(emoji_btn_text, callback_data=f"setresultoptions_{poll_id}_{idx}_setemoji")
+        priority_btn_text = "⭐ Сделать приоритетным" if not is_priority else "☆ Обычный вариант"
+        priority_btn = InlineKeyboardButton(priority_btn_text, callback_data=f"setresultoptions_{poll_id}_{idx}_priority_{1 if not is_priority else 0}")
+        edit_text_btn = InlineKeyboardButton("📝 Изменить текст", callback_data=f"setresultoptions_{poll_id}_{idx}_edittext")
         keyboard.append([InlineKeyboardButton(f'Вариант: {opt}', callback_data='noop')])
         keyboard.append(btns)
         keyboard.append(style_row)
-        keyboard.append([emoji_btn])
+        keyboard.append([emoji_btn, priority_btn])
+        keyboard.append([edit_text_btn])
     # Кнопки для смены стиля по умолчанию для всех вариантов
     style_row_global = [
         InlineKeyboardButton('Список (все)', callback_data=f'setresultoptions_{poll_id}_STYLE_list'),
@@ -1240,6 +1256,22 @@ async def setresultoptions_callback(update: Update, context: ContextTypes.DEFAUL
         except Exception as e:
             logger.error(f'[SETRESULTOPTIONS] setemoji: ошибка при отправке сообщения user_id={user_id}: {e}')
         return
+        
+    if len(data) == 4 and data[3] == 'edittext':
+        poll_id = int(data[1])
+        option_index = int(data[2])
+        user_id = query.from_user.id
+
+        if user_id not in context.application.user_data:
+            context.application.user_data[user_id] = {}
+        
+        app_user_data = context.application.user_data[user_id]
+        app_user_data['waiting_for_option_text'] = True
+        app_user_data['edittext_poll_id'] = poll_id
+        app_user_data['edittext_option_index'] = option_index
+        
+        await query.edit_message_text('Пожалуйста, отправьте новый текст для этого варианта ответа.')
+        return
 
     poll_id = int(data[1])
 
@@ -1272,6 +1304,8 @@ async def setresultoptions_callback(update: Update, context: ContextTypes.DEFAUL
             c.execute('UPDATE poll_option_settings SET show_count = ? WHERE poll_id = ? AND option_index = ?', (int(value), poll_id, option_index))
         elif field == 'namesstyle':
             c.execute('UPDATE poll_option_settings SET names_style = ? WHERE poll_id = ? AND option_index = ?', (value, poll_id, option_index))
+        elif field == 'priority':
+            c.execute('UPDATE poll_option_settings SET is_priority = ? WHERE poll_id = ? AND option_index = ?', (int(value), poll_id, option_index))
         conn.commit()
         
         await query.edit_message_text('Настройка изменена. Обновляю меню...', reply_markup=None)
@@ -1327,6 +1361,52 @@ async def setemoji_message_handler(update: Update, context: ContextTypes.DEFAULT
         await setresultoptions(update, context)
         return
 
+async def setoptiontext_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in context.application.user_data:
+        return
+
+    app_user_data = context.application.user_data[user_id]
+    if not app_user_data.get('waiting_for_option_text'):
+        return
+
+    poll_id = app_user_data.pop('edittext_poll_id')
+    option_index = app_user_data.pop('edittext_option_index')
+    app_user_data.pop('waiting_for_option_text', None)
+    new_text = update.message.text.strip()
+
+    try:
+        c.execute('SELECT options FROM polls WHERE poll_id = ?', (poll_id,))
+        row = c.fetchone()
+        if not row:
+            await update.message.reply_text("Не удалось найти опрос для обновления.")
+            return
+
+        options_list = row[0].split(',')
+        # The text stored in the `responses` table is always stripped.
+        # The text from the `options` string might have leading spaces.
+        old_text_in_db = options_list[option_index].strip() 
+        
+        # Now, rebuild the options list carefully to avoid propagating weird spacing.
+        # Strip all options before putting the new one in.
+        stripped_options = [opt.strip() for opt in options_list]
+        stripped_options[option_index] = new_text # new_text is already stripped
+        new_options_str = ','.join(stripped_options)
+
+        # Update polls and responses
+        c.execute('UPDATE polls SET options = ? WHERE poll_id = ?', (new_options_str, poll_id))
+        c.execute('UPDATE responses SET response = ? WHERE poll_id = ? AND response = ?', (new_text, poll_id, old_text_in_db))
+        conn.commit()
+
+        await update.message.reply_text(f"Текст варианта обновлен на: '{new_text}'.")
+
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении текста варианта: {e}")
+        await update.message.reply_text("Произошла ошибка при обновлении текста варианта.")
+
+    # Return to the settings menu
+    await setresultoptions(update, context)
+
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -1349,6 +1429,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(button_callback, pattern='^(help|collect|exclude|newpoll|startpoll|results|setmessage|setoptions|mychats|poll_.*|selectchat_.*|setresultoptions)$'))
     # --- ДОБАВЛЕНО: handler для любых сообщений в группах ---
     application.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_user))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), setoptiontext_message_handler))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), setemoji_message_handler))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_dialog_handler))
     application.add_handler(CallbackQueryHandler(refresh_results_callback, pattern='^refreshresults_'))
