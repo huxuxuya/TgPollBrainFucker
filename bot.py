@@ -43,7 +43,8 @@ c.execute('''CREATE TABLE IF NOT EXISTS poll_settings (
     poll_id INTEGER PRIMARY KEY,
     default_show_names INTEGER DEFAULT 1,
     default_names_style TEXT DEFAULT 'list',
-    default_show_count INTEGER DEFAULT 1
+    default_show_count INTEGER DEFAULT 1,
+    target_sum REAL DEFAULT 0
 )''')
 c.execute('''CREATE TABLE IF NOT EXISTS poll_option_settings (
     poll_id INTEGER,
@@ -53,6 +54,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS poll_option_settings (
     show_count INTEGER DEFAULT NULL,
     emoji TEXT DEFAULT NULL,
     is_priority INTEGER DEFAULT 0,
+    contribution_amount REAL DEFAULT 0,
     PRIMARY KEY (poll_id, option_index)
 )''')
 # --- ДОБАВЛЕНО: добавляем поле emoji, если его нет ---
@@ -74,6 +76,21 @@ try:
     conn.commit()
 except Exception:
     pass # поле уже есть
+
+# --- ДОБАВЛЕНО: поле для суммы сбора в настройки опроса ---
+try:
+    c.execute('ALTER TABLE poll_settings ADD COLUMN target_sum REAL DEFAULT 0')
+    conn.commit()
+except Exception:
+    pass # поле уже есть
+
+# --- ДОБАВЛЕНО: поле для суммы взноса в настройки варианта ответа ---
+try:
+    c.execute('ALTER TABLE poll_option_settings ADD COLUMN contribution_amount REAL DEFAULT 0')
+    conn.commit()
+except Exception:
+    pass # поле уже есть
+
 conn.commit()
 
 # --- ДОБАВЛЕНО: функция для добавления пользователя в participants ---
@@ -633,121 +650,118 @@ async def startpoll(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     conn.commit()
     await context.bot.send_message(chat_id=user_id, text=f'Опрос {poll_id} запущен.')
 
-async def results(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update)
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    if chat_id < 0:  # Group chat
-        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-            await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-            return
-        context.user_data['selected_chat_id'] = chat_id
-    else:  # Private chat
-        if 'selected_chat_id' not in context.user_data:
-            await select_chat(update, context, 'results')
-            return
-        chat_id = context.user_data['selected_chat_id']
-        if user_id not in [admin.user.id for admin in await context.bot.get_chat_administrators(chat_id)]:
-            await context.bot.send_message(chat_id=user_id, text='Только администраторы могут использовать эту команду.')
-            return
-    
-    c.execute('SELECT poll_id, message FROM polls WHERE chat_id = ? AND status = ?', (chat_id, 'active'))
-    active_polls = c.fetchall()
-    if not active_polls:
-        await context.bot.send_message(chat_id=user_id, text='Нет активных опросов.')
-        return
-    
-    if len(active_polls) > 1:
-        keyboard = [[InlineKeyboardButton(f'Опрос {poll_id}: {message[:20]}...', callback_data=f'results_{poll_id}')] for poll_id, message in active_polls]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(chat_id=user_id, text='Выберите опрос для просмотра результатов:', reply_markup=reply_markup)
-    else:
-        poll_id = active_polls[0][0]
-        await show_results(update, context, poll_id, user_id)
+# --- Вспомогательная функция для генерации прогресс-бара ---
+def get_progress_bar_text(poll_id: int, options: list, option_voters: dict) -> str:
+    progress_bar_text = ''
+    try:
+        c.execute('SELECT target_sum FROM poll_settings WHERE poll_id = ?', (poll_id,))
+        target_sum_res = c.fetchone()
+        target_sum = target_sum_res[0] if target_sum_res and target_sum_res[0] is not None else 0
+        if target_sum > 0:
+            total_contribution = 0
+            c.execute('SELECT option_index, contribution_amount FROM poll_option_settings WHERE poll_id = ? AND contribution_amount > 0', (poll_id,))
+            contributions = c.fetchall()
+            contribution_map = {index: amount for index, amount in contributions}
+            for idx, opt_text in enumerate(options):
+                if idx in contribution_map:
+                    contribution_amount = contribution_map[idx]
+                    num_voters_for_option = len(option_voters.get(opt_text.strip(), set()))
+                    total_contribution += num_voters_for_option * contribution_amount
+            
+            percentage = (total_contribution / target_sum) * 100 if target_sum > 0 else 0
+            filled_blocks = int(min(percentage, 100) / 10)
+            empty_blocks = 10 - filled_blocks
+            progress_bar = '█' * filled_blocks + '░' * empty_blocks
+            
+            formatted_total = f'{total_contribution:,.0f}'.replace(',', ' ')
+            formatted_target = f'{target_sum:,.0f}'.replace(',', ' ')
+            
+            progress_bar_text = f'\n\n<b>Сбор средств</b>\n{progress_bar} {formatted_total} / {formatted_target} ({percentage:.1f}%)'
+    except Exception as e:
+        logger.error(f"Error generating progress bar for poll {poll_id}: {e}")
+        return ''
+    return progress_bar_text
 
-async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: int, user_id: int = None) -> None:
-    add_user_to_participants(update)
+def _generate_results_text_and_options(poll_id: int, include_non_voters: bool) -> (str, list):
+    """
+    Generates the complete, formatted text for poll results and the list of options.
+    Handles orphaned responses to prevent KeyErrors.
     
-    # Получаем ID чата из опроса, чтобы корректно найти участников
-    c.execute("SELECT chat_id, message_id FROM polls WHERE poll_id = ?", (poll_id,))
+    :param poll_id: The ID of the poll.
+    :param include_non_voters: If True, a list of non-voters will be appended.
+    :return: A tuple of (formatted_result_text, options_list).
+    """
+    
+    # 1. Fetch basic poll info
+    c.execute("SELECT chat_id, message, options FROM polls WHERE poll_id = ?", (poll_id,))
     res = c.fetchone()
     if not res:
-        if user_id:
-            await context.bot.send_message(chat_id=user_id, text=f"Опрос с ID {poll_id} не найден.")
-        elif update.effective_message:
-            await update.effective_message.reply_text(f"Опрос с ID {poll_id} не найден.")
-        return
-    chat_id, poll_message_id = res
+        return None, None
+    chat_id, poll_message, options_str = res
+    options = [opt.strip() for opt in options_str.split(',')]
 
-    if user_id is None:
-        user_id = update.effective_user.id
-        
+    # 2. Fetch all non-excluded participants and their responses for this poll
     c.execute('SELECT p.user_id, p.username, p.first_name, p.last_name, r.response FROM participants p LEFT JOIN responses r ON p.user_id = r.user_id AND r.poll_id = ? WHERE p.chat_id = ? AND p.excluded = 0', (poll_id, chat_id))
-    responses = c.fetchall()
-    logger.info(f'[SHOW_RESULTS] Найдено {len(responses)} участников для опроса {poll_id} в чате {chat_id}.')
+    all_participants_with_responses = c.fetchall()
     
-    # Подсчет количества проголосовавших
-    voted_count = sum(1 for row in responses if row[4])
-    
-    c.execute('SELECT options, message FROM polls WHERE poll_id = ?', (poll_id,))
-    poll_row = c.fetchone()
-    if poll_row:
-        options_str, poll_message = poll_row
-        options = [opt.strip() for opt in options_str.split(',')]
-    else:
-        poll_message = f'Опрос {poll_id}'
-        options = []
-    # Собираем по вариантам: user_id, имя, username
+    # 3. Process responses and non-voters
     option_voters = {opt: set() for opt in options}
     all_voted_user_ids = set()
-    for user_id_part, username, first_name, last_name, response in responses:
-        if response:
-            name = first_name + (f' {last_name}' if last_name else '')
-            option_voters[response].add((user_id_part, name, username))
-            all_voted_user_ids.add(user_id_part)
-
-    # Сортируем варианты по числу голосов (убывание)
-    sorted_options = sorted(options, key=lambda o: len(option_voters[o]), reverse=True)
-    max_votes = max((len(option_voters[o]) for o in options), default=0)
-    
-    # Список не проголосовавших (только уникальные user_id)
     not_voted_dict = {}
-    for user_id_part, username, first_name, last_name, response in responses:
-        if not response and user_id_part not in not_voted_dict:
-            name = first_name + (f' {last_name}' if last_name else '')
-            not_voted_dict[user_id_part] = (name, username)
-    logger.info(f'[SHOW_RESULTS] Список не проголосовавших ({len(not_voted_dict)}): {not_voted_dict}')
 
-    # --- Получаем настройки ---
+    for user_id_part, username, first_name, last_name, response in all_participants_with_responses:
+        name = first_name + (f' {last_name}' if last_name else '')
+        if response:
+            # FIX: Safely handle responses that may not match current options
+            if response in option_voters:
+                option_voters[response].add((user_id_part, name, username))
+                all_voted_user_ids.add(user_id_part)
+            else:
+                logger.warning(f"Orphaned response '{response}' found for poll {poll_id} from user {user_id_part}. Ignoring.")
+        elif user_id_part not in not_voted_dict:
+            not_voted_dict[user_id_part] = (name, username)
+
+    # 4. Generate the result text
+    # --- Get display settings ---
     c.execute('SELECT default_show_names, default_names_style, default_show_count FROM poll_settings WHERE poll_id = ?', (poll_id,))
     default_settings = c.fetchone() or (1, 'list', 1)
-    logger.info(f'[RESULTS] Формирование результатов для poll_id={poll_id}. Настройки по умолчанию: {default_settings}')
-    # Формируем красивый HTML-результат
-    result_text = f'<b>📊 {poll_message}</b>\n\n<b>Результаты</b> <i>(👥 {len(all_voted_user_ids)})</i>:'
-    for idx, opt in enumerate(sorted_options):
-        c.execute('SELECT show_names, names_style, show_count, emoji, is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, options.index(opt)))
+    
+    # --- Generate progress bar ---
+    progress_bar_text = get_progress_bar_text(poll_id, options, option_voters)
+
+    # --- Generate main result text ---
+    voted_count = len(all_voted_user_ids)
+    header = f'<b>📊 {poll_message}</b>\n\n<b>Результаты</b> <i>(👥 {voted_count})</i>:'
+    result_text = header
+    if progress_bar_text:
+        result_text += progress_bar_text
+
+    # --- Sort options and add voter lists ---
+    sorted_options = sorted(options, key=lambda o: len(option_voters.get(o, set())), reverse=True)
+    
+    for opt in sorted_options:
+        original_index = options.index(opt)
+        c.execute('SELECT show_names, names_style, show_count, emoji, is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, original_index))
         opt_settings = c.fetchone()
-        logger.info(f'[RESULTS] Вариант {idx} ({opt}): индивидуальные настройки: {opt_settings}')
         show_names = default_settings[0] if opt_settings is None or opt_settings[0] is None else opt_settings[0]
         names_style = default_settings[1] if opt_settings is None or opt_settings[1] is None else opt_settings[1]
         show_count = default_settings[2] if opt_settings is None or opt_settings[2] is None else opt_settings[2]
         emoji = opt_settings[3] if opt_settings and opt_settings[3] else ''
         is_priority = opt_settings[4] if opt_settings and opt_settings[4] else 0
-        logger.info(f'[RESULTS] Вариант {idx} ({opt}): применяемые настройки: show_names={show_names}, names_style={names_style}, show_count={show_count}, emoji={emoji}, is_priority={is_priority}')
         
-        voters = option_voters[opt]
-        # Итоговая строка
+        voters = option_voters.get(opt, set())
+        # Header for the option
         if show_count:
-            result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt}</b>: <b>{len(voters)}</b>'
+            result_text += f'\n\n<b>{"⭐" if is_priority else "☆"} {opt}</b>: <b>{len(voters)}</b>'
         else:
-            result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt}</b>:'
+            result_text += f'\n\n<b>{"⭐" if is_priority else "☆"} {opt}</b>:'
             
-        # Список проголосовавших
+        # List of voters
         if show_names and voters:
             sorted_voters = sorted(list(voters), key=lambda x: x[1])
             if names_style == 'inline':
-                names = ', '.join(f'{emoji} {n}{f" (@{u})" if u else ""}' if emoji else f'{n}{f" (@{u})" if u else ""}' for _, n, u in sorted_voters)
-                result_text += f' — {names}'
+                names_str = ', '.join(f'{emoji} {n}{f" (@{u})" if u else ""}' if emoji else f'{n}{f" (@{u})" if u else ""}' for _, n, u in sorted_voters)
+                result_text += f' — {names_str}'
             elif names_style == 'small':
                 for _, n, u in sorted_voters:
                     result_text += f'\n    <i>{f"{emoji} {n}" if emoji else f"{n}"}{f" (@{u})" if u else ""}</i>'
@@ -755,11 +769,29 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
                 for _, n, u in sorted_voters:
                     result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}{f" (@{u})" if u else ""}'
 
-    if not_voted_dict:
-        result_text += '\n\n<b>Не проголосовали:</b>\n'
+    # --- Add list of non-voters ---
+    if include_non_voters and not_voted_dict:
+        result_text += '\n\n<b>Не проголосовали:</b>'
         sorted_not_voted = sorted(list(not_voted_dict.values()), key=lambda x: x[0])
-        for n, u in sorted_not_voted:
-            result_text += f'{n}{f" (@{u})" if u else ""}\n'
+        names_list = [f'{n}{f" (@{u})" if u else ""}' for n, u in sorted_not_voted]
+        result_text += '\n' + '\n'.join(names_list)
+        
+    return result_text, options
+
+async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: int, user_id: int = None) -> None:
+    add_user_to_participants(update)
+    
+    if user_id is None:
+        user_id = update.effective_user.id
+        
+    result_text, _ = _generate_results_text_and_options(poll_id, include_non_voters=True)
+
+    if not result_text:
+        if user_id:
+            await context.bot.send_message(chat_id=user_id, text=f"Опрос с ID {poll_id} не найден.")
+        elif update.effective_message:
+            await update.effective_message.reply_text(f"Опрос с ID {poll_id} не найден.")
+        return
             
     # Кнопка обновления результатов в группе
     keyboard = [[InlineKeyboardButton('🔄 Обновить результаты в группе', callback_data=f'refreshresults_{poll_id}')]]
@@ -770,7 +802,39 @@ async def results_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     query = update.callback_query
     await query.answer()
     poll_id = int(query.data.split('_')[1])
-    await show_results(update, context, poll_id, query.from_user.id)
+    # Получаем chat_id и старый message_id
+    c.execute('SELECT chat_id, message_id FROM polls WHERE poll_id = ?', (poll_id,))
+    row = c.fetchone()
+    if not row:
+        await query.edit_message_text('Опрос не найден.')
+        return
+    chat_id, old_message_id = row
+
+    result_text, options = _generate_results_text_and_options(poll_id, include_non_voters=False)
+
+    if not result_text:
+        await query.edit_message_text(f'Не удалось сформировать результаты для опроса {poll_id}.')
+        return
+
+    # Удаляем старое сообщение с результатами
+    if old_message_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=old_message_id)
+        except Exception as e:
+            logger.warning(f"Could not delete old poll message {old_message_id} in chat {chat_id}: {e}")
+            pass  # Может быть уже удалено или нет прав
+
+    # Отправляем новое сообщение в группу (тихо) с кнопками голосования
+    poll_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(opt, callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)])
+    try:
+        new_msg = await context.bot.send_message(chat_id=chat_id, text=result_text, parse_mode='HTML', disable_notification=True, reply_markup=poll_keyboard)
+        # Сохраняем новый message_id
+        c.execute('UPDATE polls SET message_id = ? WHERE poll_id = ?', (new_msg.message_id, poll_id))
+        conn.commit()
+        await query.edit_message_text('Результаты обновлены в группе!')
+    except Exception as e:
+        logger.error(f"Could not send new poll message in chat {chat_id}: {e}")
+        await query.edit_message_text('Ошибка при обновлении результатов в группе.')
 
 # --- Обработчик кнопки обновления результатов в группе ---
 async def refresh_results_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -784,12 +848,7 @@ async def refresh_results_callback(update: Update, context: ContextTypes.DEFAULT
         await query.edit_message_text('Опрос не найден.')
         return
     chat_id, old_message_id, options_str, poll_message = row
-    # Удаляем старое сообщение с результатами
-    if old_message_id:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=old_message_id)
-        except Exception as e:
-            pass  # Может быть уже удалено
+    
     # Формируем новое сообщение с результатами
     c.execute('SELECT p.user_id, p.username, p.first_name, p.last_name, r.response FROM participants p LEFT JOIN responses r ON p.user_id = r.user_id AND r.poll_id = ? WHERE p.chat_id = ? AND p.excluded = 0', (poll_id, chat_id))
     responses = c.fetchall()
@@ -806,7 +865,14 @@ async def refresh_results_callback(update: Update, context: ContextTypes.DEFAULT
     c.execute('SELECT default_show_names, default_names_style, default_show_count FROM poll_settings WHERE poll_id = ?', (poll_id,))
     default_settings = c.fetchone() or (1, 'list', 1)
     logger.info(f'[RESULTS] Формирование результатов для poll_id={poll_id}. Настройки по умолчанию: {default_settings}')
+
+    # --- Генерация прогресс-бара ---
+    progress_bar_text = get_progress_bar_text(poll_id, options, option_voters)
+
     result_text = f'<b>📊 {poll_message}</b>\n\n<b>Результаты</b> <i>(👥 {len(all_voted_user_ids)})</i>:'
+    if progress_bar_text:
+        result_text += progress_bar_text
+
     for idx, opt in enumerate(sorted_options):
         c.execute('SELECT show_names, names_style, show_count, emoji, is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, options.index(opt)))
         opt_settings = c.fetchone()
@@ -833,13 +899,27 @@ async def refresh_results_callback(update: Update, context: ContextTypes.DEFAULT
             else:  # list
                 for _, n, u in sorted_voters:
                     result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}{f" (@{u})" if u else ""}'
+    
+    # Удаляем старое сообщение с результатами
+    if old_message_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=old_message_id)
+        except Exception as e:
+            logger.warning(f"Could not delete old poll message {old_message_id} in chat {chat_id}: {e}")
+            pass  # Может быть уже удалено или нет прав
+
     # Отправляем новое сообщение в группу (тихо) с кнопками голосования
     poll_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton(opt, callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)])
-    new_msg = await context.bot.send_message(chat_id=chat_id, text=result_text, parse_mode='HTML', disable_notification=True, reply_markup=poll_keyboard)
-    # Сохраняем новый message_id
-    c.execute('UPDATE polls SET message_id = ? WHERE poll_id = ?', (new_msg.message_id, poll_id))
-    conn.commit()
-    await query.edit_message_text('Результаты обновлены в группе!')
+    try:
+        new_msg = await context.bot.send_message(chat_id=chat_id, text=result_text, parse_mode='HTML', disable_notification=True, reply_markup=poll_keyboard)
+        # Сохраняем новый message_id
+        c.execute('UPDATE polls SET message_id = ? WHERE poll_id = ?', (new_msg.message_id, poll_id))
+        conn.commit()
+        await query.edit_message_text('Результаты обновлены в группе!')
+    except Exception as e:
+        logger.error(f"Could not send new poll message in chat {chat_id}: {e}")
+        await query.edit_message_text('Ошибка при обновлении результатов в группе.')
+
 
 # --- ДОБАВЛЕНО: обновить меню с кнопкой "Список групп" ---
 def get_admin_keyboard(is_admin):
@@ -944,68 +1024,36 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await mychats(update, context, force_user_id=user_id)
     elif action.startswith('poll_'):
         poll_id, response_idx = action.split('_')[1], action.split('_')[2]
-        c.execute('SELECT options, message, chat_id, message_id FROM polls WHERE poll_id = ?', (poll_id,))
-        options_str, poll_message, poll_chat_id, poll_message_id = c.fetchone()
+        
+        c.execute('SELECT chat_id, message_id, options FROM polls WHERE poll_id = ?', (poll_id,))
+        res = c.fetchone()
+        if not res:
+            logger.error(f"Poll {poll_id} not found when voting.")
+            return
+        poll_chat_id, poll_message_id, options_str = res
+
         options = options_str.split(',')
         response = options[int(response_idx)].strip()
+
         # Удаляем предыдущий ответ пользователя для этого poll_id
         c.execute('DELETE FROM responses WHERE poll_id = ? AND user_id = ?', (poll_id, user_id))
         # Вставляем новый ответ
         c.execute('INSERT INTO responses (poll_id, user_id, response) VALUES (?, ?, ?)', (poll_id, user_id, response))
         conn.commit()
-        # --- Формируем результаты с учётом настроек ---
-        names = {opt.strip(): set() for opt in options}  # set для уникальности
-        # Получаем все ответы
-        sql = 'SELECT r.response, p.first_name, p.last_name, p.user_id FROM responses r JOIN participants p ON r.user_id = p.user_id AND p.chat_id = ? WHERE r.poll_id = ?'
-        c.execute(sql, (poll_chat_id, poll_id))
-        raw_responses = c.fetchall()
-        for resp, first_name, last_name, uid in raw_responses:
-            resp_clean = resp.strip() if resp else ''
-            if resp_clean in names:
-                name = first_name + (f' {last_name}' if last_name else '')
-                names[resp_clean].add((uid, name))  # по user_id
-        # Подсчет количества проголосовавших (уникальных user_id с ответом)
-        voted_user_ids = set(uid for resp, first_name, last_name, uid in raw_responses if resp)
-        voted_count = len(voted_user_ids)
-        # --- Получаем настройки ---
-        c.execute('SELECT default_show_names, default_names_style, default_show_count FROM poll_settings WHERE poll_id = ?', (poll_id,))
-        default_settings = c.fetchone() or (1, 'list', 1)
-        # Формируем результаты с учётом настроек
-        result_text = f'<b>{poll_message}</b>\n\n<b>Результаты</b> <i>(проголосовало: {voted_count})</i>:'
-        for idx, opt in enumerate(options):
-            opt_clean = opt.strip()
-            unique_voters = names[opt_clean]
-            c.execute('SELECT show_names, names_style, show_count, emoji, is_priority FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, idx))
-            opt_settings = c.fetchone()
-            
-            show_names = default_settings[0] if opt_settings is None or opt_settings[0] is None else opt_settings[0]
-            names_style = default_settings[1] if opt_settings is None or opt_settings[1] is None else opt_settings[1]
-            show_count = default_settings[2] if opt_settings is None or opt_settings[2] is None else opt_settings[2]
-            emoji = opt_settings[3] if opt_settings and opt_settings[3] else ''
-            is_priority = opt_settings[4] if opt_settings and opt_settings[4] else 0
-            
-            if show_count:
-                result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt_clean}</b>: <b>{len(unique_voters)}</b>'
-            else:
-                result_text += f'\n<b>{"⭐" if is_priority else "☆"} {opt_clean}</b>:'
-                
-            if show_names and unique_voters:
-                if names_style == 'inline':
-                    names_str = ', '.join(f'{emoji} {n}' if emoji else n for _, n in sorted(unique_voters))
-                    result_text += f' — {names_str}'
-                elif names_style == 'small':
-                    for _, n in sorted(unique_voters):
-                        result_text += f'\n    <i>{f"{emoji} {n}" if emoji else f"{n}"}</i>'
-                else:
-                    for _, n in sorted(unique_voters):
-                        result_text += f'\n    {f"{emoji} {n}" if emoji else f"{n}"}'
-        text_to_send = result_text
+        
+        # --- ИЗМЕНЕНО: Используем новую функцию для генерации текста ---
+        text_to_send, new_options = _generate_results_text_and_options(int(poll_id), include_non_voters=False)
+        
+        if not text_to_send:
+            logger.error(f"Failed to generate poll results for poll {poll_id} after a vote.")
+            return
+
         try:
             await context.bot.edit_message_text(
                 chat_id=poll_chat_id,
                 message_id=poll_message_id,
                 text=text_to_send,
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(opt.strip(), callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)]),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(opt.strip(), callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(new_options)]),
                 parse_mode='HTML'
             )
         except Exception as e:
@@ -1226,11 +1274,19 @@ async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         priority_btn_text = "⭐ Сделать приоритетным" if not is_priority else "☆ Обычный вариант"
         priority_btn = InlineKeyboardButton(priority_btn_text, callback_data=f"setresultoptions_{poll_id}_{idx}_priority_{1 if not is_priority else 0}")
         edit_text_btn = InlineKeyboardButton("📝 Изменить текст", callback_data=f"setresultoptions_{poll_id}_{idx}_edittext")
+        
+        # --- ДОБАВЛЕНО: Кнопка для установки взноса ---
+        c.execute('SELECT contribution_amount FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, idx))
+        contribution_res = c.fetchone()
+        contribution_amount = contribution_res[0] if contribution_res and contribution_res[0] is not None else 0
+        contribution_btn_text = f"💰 Взнос: {int(contribution_amount)}" if contribution_amount > 0 else "💰 Установить взнос"
+        contribution_btn = InlineKeyboardButton(contribution_btn_text, callback_data=f"setresultoptions_{poll_id}_{idx}_setcontribution")
+
         keyboard.append([InlineKeyboardButton(f'Вариант: {opt}', callback_data='noop')])
         keyboard.append(btns)
         keyboard.append(style_row)
         keyboard.append([emoji_btn, priority_btn])
-        keyboard.append([edit_text_btn])
+        keyboard.append([edit_text_btn, contribution_btn])
     # Кнопки для смены стиля по умолчанию для всех вариантов
     style_row_global = [
         InlineKeyboardButton('Список (все)', callback_data=f'setresultoptions_{poll_id}_STYLE_list'),
@@ -1238,6 +1294,14 @@ async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton('Мелко (все)', callback_data=f'setresultoptions_{poll_id}_STYLE_small')
     ]
     keyboard.append(style_row_global)
+
+    # --- ДОБАВЛЕНО: Кнопка установки целевой суммы ---
+    c.execute('SELECT target_sum FROM poll_settings WHERE poll_id = ?', (poll_id,))
+    target_sum_res = c.fetchone()
+    target_sum = target_sum_res[0] if target_sum_res and target_sum_res[0] is not None else 0
+    target_sum_text = f"🎯 Цель сбора: {int(target_sum)}" if target_sum > 0 else "🎯 Установить цель сбора"
+    keyboard.append([InlineKeyboardButton(target_sum_text, callback_data=f'setresultoptions_{poll_id}_settargetsum')])
+
     await context.bot.send_message(chat_id=user_id, text='Настройте вывод результатов для каждого варианта:', reply_markup=InlineKeyboardMarkup(keyboard))
 
 # --- Callback для изменения настроек варианта ---
@@ -1248,6 +1312,32 @@ async def setresultoptions_callback(update: Update, context: ContextTypes.DEFAUL
     data = query.data.split('_')
     logger.info(f'[SETRESULTOPTIONS] Callback data: {data}')
 
+    # --- ДОБАВЛЕНО: обработка установки целевой суммы ---
+    if len(data) == 3 and data[2] == 'settargetsum':
+        poll_id = int(data[1])
+        user_id = query.from_user.id
+        if user_id not in context.application.user_data:
+            context.application.user_data[user_id] = {}
+        app_user_data = context.application.user_data[user_id]
+        app_user_data['waiting_for_target_sum'] = True
+        app_user_data['target_sum_poll_id'] = poll_id
+        await query.edit_message_text('Пожалуйста, отправьте целевую сумму сбора (число).')
+        return
+
+    # --- ДОБАВЛЕНО: обработка установки взноса ---
+    if len(data) == 4 and data[3] == 'setcontribution':
+        poll_id = int(data[1])
+        option_index = int(data[2])
+        user_id = query.from_user.id
+        if user_id not in context.application.user_data:
+            context.application.user_data[user_id] = {}
+        app_user_data = context.application.user_data[user_id]
+        app_user_data['waiting_for_contribution'] = True
+        app_user_data['contribution_poll_id'] = poll_id
+        app_user_data['contribution_option_index'] = option_index
+        await query.edit_message_text('Пожалуйста, отправьте сумму взноса для этого варианта (число).')
+        return
+        
     # Handle setemoji: callback_data=f"setresultoptions_{poll_id}_{idx}_setemoji"
     # data: ['setresultoptions', poll_id, idx, 'setemoji']
     if len(data) == 4 and data[3] == 'setemoji':
@@ -1424,6 +1514,84 @@ async def setoptiontext_message_handler(update: Update, context: ContextTypes.DE
     # Return to the settings menu
     await setresultoptions(update, context)
 
+# --- ДОБАВЛЕНО: Обработчики для установки числовых значений ---
+async def settargetsum_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    app_user_data = context.application.user_data[user_id]
+    poll_id_to_return = app_user_data.get('target_sum_poll_id')
+    try:
+        amount = float(update.message.text.strip())
+        poll_id = app_user_data.pop('target_sum_poll_id')
+        app_user_data.pop('waiting_for_target_sum', None)
+
+        c.execute('INSERT OR IGNORE INTO poll_settings (poll_id) VALUES (?)', (poll_id,))
+        c.execute('UPDATE poll_settings SET target_sum = ? WHERE poll_id = ?', (amount, poll_id))
+        conn.commit()
+
+        await update.message.reply_text(f'Целевая сумма {int(amount)} сохранена.')
+    except (ValueError, TypeError):
+        await update.message.reply_text('Неверный формат. Пожалуйста, введите число.')
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении целевой суммы: {e}")
+        await update.message.reply_text("Произошла ошибка при сохранении.")
+
+    # Вернуться в меню настроек
+    if poll_id_to_return:
+        context.user_data['setresultoptions_poll_id'] = poll_id_to_return
+        await setresultoptions(update, context)
+
+async def setcontribution_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    app_user_data = context.application.user_data[user_id]
+    poll_id_to_return = app_user_data.get('contribution_poll_id')
+    try:
+        amount = float(update.message.text.strip())
+        poll_id = app_user_data.pop('contribution_poll_id')
+        option_index = app_user_data.pop('contribution_option_index')
+        app_user_data.pop('waiting_for_contribution', None)
+
+        c.execute('INSERT OR IGNORE INTO poll_option_settings (poll_id, option_index) VALUES (?, ?)', (poll_id, option_index))
+        c.execute('UPDATE poll_option_settings SET contribution_amount = ? WHERE poll_id = ? AND option_index = ?', (amount, poll_id, option_index))
+        conn.commit()
+
+        await update.message.reply_text(f'Сумма взноса {int(amount)} сохранена.')
+    except (ValueError, TypeError):
+        await update.message.reply_text('Неверный формат. Пожалуйста, введите число.')
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении взноса: {e}")
+        await update.message.reply_text("Произошла ошибка при сохранении.")
+    
+    # Вернуться в меню настроек
+    if poll_id_to_return:
+        context.user_data['setresultoptions_poll_id'] = poll_id_to_return
+        await setresultoptions(update, context)
+
+# --- ДОБАВЛЕНО: Единый обработчик текстовых сообщений ---
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    # Сначала проверяем состояния, которые не требуют авторизации или выбора чата
+    # и хранятся в application.user_data
+    if user_id in context.application.user_data:
+        app_user_data = context.application.user_data[user_id]
+        if app_user_data.get('waiting_for_emoji'):
+            await setemoji_message_handler(update, context)
+            return
+        if app_user_data.get('waiting_for_option_text'):
+            await setoptiontext_message_handler(update, context)
+            return
+        if app_user_data.get('waiting_for_target_sum'):
+            await settargetsum_message_handler(update, context)
+            return
+        if app_user_data.get('waiting_for_contribution'):
+            await setcontribution_message_handler(update, context)
+            return
+
+    # Затем проверяем состояния диалога, хранящиеся в user_data
+    if context.user_data.get('waiting_for_poll_message') or context.user_data.get('waiting_for_poll_options'):
+        await message_dialog_handler(update, context)
+        return
+
 def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -1444,11 +1612,11 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(results_callback, pattern='^results_'))
     application.add_handler(CallbackQueryHandler(setresultoptions_callback, pattern='^setresultoptions_'))
     application.add_handler(CallbackQueryHandler(button_callback, pattern='^(help|collect|exclude|newpoll|startpoll|results|setmessage|setoptions|mychats|poll_.*|selectchat_.*|setresultoptions)$'))
+    # --- ИЗМЕНЕНО: Используем единый обработчик для текстовых сообщений ---
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
     # --- ДОБАВЛЕНО: handler для любых сообщений в группах ---
-    application.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_user))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), setoptiontext_message_handler))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), setemoji_message_handler))
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_dialog_handler))
+    application.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_user), group=1) # Даем другую группу, чтобы он не пересекался с text_handler
+    
     application.add_handler(CallbackQueryHandler(refresh_results_callback, pattern='^refreshresults_'))
     application.add_handler(CallbackQueryHandler(participants_callback, pattern='^participants$'))
     application.add_handler(CallbackQueryHandler(participantschat_callback, pattern='^participantschat_'))
