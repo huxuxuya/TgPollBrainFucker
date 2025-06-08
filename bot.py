@@ -199,6 +199,8 @@ async def execute_command(update: Union[Update, CallbackQuery], context: Context
         await startpoll(update_obj, context)
     elif command == 'results':
         await results(update_obj, context)
+    elif command == 'setresultoptions':  # <--- ДОБАВИТЬ ЭТО
+        await setresultoptions(update_obj, context)
 
 # --- ДОБАВЛЕНО: функция для получения названия группы по chat_id ---
 def get_group_title(chat_id):
@@ -322,7 +324,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         admin_chats = await get_admin_chats(update, context)
         is_admin = len(admin_chats) > 0
     reply_markup = InlineKeyboardMarkup(get_admin_keyboard(is_admin))
-    await context.bot.send_message(chat_id=user_id, text='Доступные команды:\n/start - Начать работу с ботом\n/help - Показать помощь\n/collect - Собрать список участников группы\n/exclude - Исключить участника из опроса\n/setmessage - Установить сообщение для опроса\n/setoptions - Установить варианты ответов для опроса\n/startpoll - Запустить опрос\n/results - Показать результаты опроса\n/newpoll - Создать новый опрос\n/mychats - Показать список известных групп\n/cleangroup - Очистить список участников группы\n/setresultoptions - Настроить вывод результатов опроса', reply_markup=reply_markup)
+    await context.bot.send_message(chat_id=user_id, text='Доступные команды:\n/start - Начать работу с ботом\n/help - Показать помощь\n/collect - Собрать список участников группы\n/exclude - Исключить участника из опроса\n/setmessage - Установить сообщение для опроса\n/setoptions - Установить варианты ответа для опроса\n/startpoll - Запустить опрос\n/results - Показать результаты опроса\n/newpoll - Создать новый опрос\n/mychats - Показать список известных групп\n/cleangroup - Очистить список участников группы\n/setresultoptions - Настроить вывод результатов опроса', reply_markup=reply_markup)
 
 async def collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user_to_participants(update)
@@ -1187,7 +1189,8 @@ async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton('В строку', callback_data=f'setresultoptions_{poll_id}_{idx}_namesstyle_inline'),
             InlineKeyboardButton('Мелко', callback_data=f'setresultoptions_{poll_id}_{idx}_namesstyle_small')
         ]
-        emoji_btn = InlineKeyboardButton(f"Установить смайлик {emoji if emoji else ''}", callback_data=f"setresultoptions_{poll_id}_{idx}_setemoji")
+        emoji_btn_text = f"Смайлик: {emoji} (сменить)" if emoji else "Установить смайлик"
+        emoji_btn = InlineKeyboardButton(emoji_btn_text, callback_data=f"setresultoptions_{poll_id}_{idx}_setemoji")
         keyboard.append([InlineKeyboardButton(f'Вариант: {opt}', callback_data='noop')])
         keyboard.append(btns)
         keyboard.append(style_row)
@@ -1212,7 +1215,21 @@ async def setresultoptions_callback(update: Update, context: ContextTypes.DEFAUL
         option_index = int(data[2])
         context.user_data['setemoji_poll_id'] = poll_id
         context.user_data['setemoji_option_index'] = option_index
-        await query.edit_message_text('Пожалуйста, отправьте смайлик (эмодзи), который будет выводиться перед каждым участником для этого варианта.')
+        user_id = update.effective_user.id
+        logger.info(f'[SETRESULTOPTIONS] setemoji: отправляю запрос на смайлик в личку user_id={user_id}, chat_type={update.effective_chat.type}')
+        if update.effective_chat.type == 'private':
+            try:
+                await context.bot.send_message(chat_id=user_id, text='Пожалуйста, отправьте смайлик (эмодзи), который будет выводиться перед каждым участником для этого варианта.')
+                logger.info(f'[SETRESULTOPTIONS] setemoji: сообщение успешно отправлено user_id={user_id}')
+            except Exception as e:
+                logger.error(f'[SETRESULTOPTIONS] setemoji: ошибка при отправке сообщения user_id={user_id}: {e}')
+        else:
+            await query.edit_message_text('Ожидаю смайлик...')
+            try:
+                await context.bot.send_message(chat_id=user_id, text='Пожалуйста, отправьте смайлик (эмодзи), который будет выводиться перед каждым участником для этого варианта.')
+                logger.info(f'[SETRESULTOPTIONS] setemoji: сообщение успешно отправлено user_id={user_id}')
+            except Exception as e:
+                logger.error(f'[SETRESULTOPTIONS] setemoji: ошибка при отправке сообщения user_id={user_id}: {e}')
         return
     if len(data) < 5:
         return
@@ -1264,15 +1281,26 @@ async def setresultoptionspoll_callback(update: Update, context: ContextTypes.DE
 
 # --- Обработчик текстового сообщения для установки эмодзи ---
 async def setemoji_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f'[SETRESULTOPTIONS] setemoji_message_handler: from user_id={update.effective_user.id}, text={update.message.text}')
     if 'setemoji_poll_id' in context.user_data and 'setemoji_option_index' in context.user_data:
         poll_id = context.user_data.pop('setemoji_poll_id')
         option_index = context.user_data.pop('setemoji_option_index')
         emoji = update.message.text.strip()
-        logger.info(f'[SETRESULTOPTIONS] Сохраняю эмодзи для poll_id={poll_id}, option_index={option_index}: emoji={emoji}')
-        c.execute('INSERT OR IGNORE INTO poll_option_settings (poll_id, option_index) VALUES (?, ?)', (poll_id, option_index))
-        c.execute('UPDATE poll_option_settings SET emoji = ? WHERE poll_id = ? AND option_index = ?', (emoji, poll_id, option_index))
-        conn.commit()
-        await update.message.reply_text(f'Смайлик {emoji} сохранён!')
+        logger.info(f'[SETRESULTOPTIONS] setemoji_message_handler: попытка сохранить emoji для poll_id={poll_id}, option_index={option_index}, user_id={update.effective_user.id}, emoji={emoji}')
+        try:
+            c.execute('SELECT emoji FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, option_index))
+            old_emoji = c.fetchone()
+            logger.info(f'[SETRESULTOPTIONS] setemoji_message_handler: emoji до записи: {old_emoji}')
+            c.execute('INSERT OR IGNORE INTO poll_option_settings (poll_id, option_index) VALUES (?, ?)', (poll_id, option_index))
+            c.execute('UPDATE poll_option_settings SET emoji = ? WHERE poll_id = ? AND option_index = ?', (emoji, poll_id, option_index))
+            conn.commit()
+            c.execute('SELECT emoji FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, option_index))
+            new_emoji = c.fetchone()
+            logger.info(f'[SETRESULTOPTIONS] setemoji_message_handler: emoji после записи: {new_emoji}')
+            await update.message.reply_text(f'Смайлик {emoji} сохранён! Он будет отображаться перед каждым участником для этого варианта.')
+            logger.info(f'[SETRESULTOPTIONS] setemoji_message_handler: сообщение об успехе отправлено user_id={update.effective_user.id}')
+        except Exception as e:
+            logger.error(f'[SETRESULTOPTIONS] setemoji_message_handler: ошибка при сохранении или отправке emoji для user_id={update.effective_user.id}: {e}')
         # Вернуться в меню настроек
         await setresultoptions(update, context)
         return
@@ -1296,9 +1324,10 @@ def main() -> None:
     application.add_handler(CommandHandler('cleangroup', cleangroup))
     application.add_handler(CallbackQueryHandler(exclude_callback, pattern='^exclude_'))
     application.add_handler(CallbackQueryHandler(results_callback, pattern='^results_'))
-    application.add_handler(CallbackQueryHandler(button_callback, pattern='^(help|collect|exclude|newpoll|startpoll|results|setmessage|setoptions|mychats|poll_|selectchat_)'))
+    application.add_handler(CallbackQueryHandler(button_callback, pattern='^(help|collect|exclude|newpoll|startpoll|results|setmessage|setoptions|mychats|poll_.*|selectchat_.*|setresultoptions)$'))
     # --- ДОБАВЛЕНО: handler для любых сообщений в группах ---
     application.add_handler(MessageHandler(filters.ChatType.GROUPS, track_group_user))
+    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), setemoji_message_handler))
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), message_dialog_handler))
     application.add_handler(CallbackQueryHandler(refresh_results_callback, pattern='^refreshresults_'))
     application.add_handler(CallbackQueryHandler(participants_callback, pattern='^participants$'))
@@ -1306,7 +1335,6 @@ def main() -> None:
     application.add_handler(CommandHandler('setresultoptions', setresultoptions))
     application.add_handler(CallbackQueryHandler(setresultoptions_callback, pattern='^setresultoptions_'))
     application.add_handler(CallbackQueryHandler(setresultoptionspoll_callback, pattern='^setresultoptionspoll_'))
-    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS, setemoji_message_handler))
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
