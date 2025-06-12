@@ -9,7 +9,7 @@ from typing import Union
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, TypeHandler
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatAction
 from telegram.error import ChatMigrated
 from telegram.helpers import escape_markdown
 
@@ -81,7 +81,7 @@ run_migration('ALTER TABLE poll_settings ADD COLUMN nudge_negative_emoji TEXT')
 
 # --- Utility Functions ---
 
-def add_user_to_participants(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
+async def add_user_to_participants(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
     user = update.effective_user
     chat = update.effective_chat
     if user and chat and chat.type in ['group', 'supergroup']:
@@ -297,7 +297,7 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
 # --- Core Commands & Entry Points ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update, context)
+    await add_user_to_participants(update, context)
     if update.effective_chat.type in ['group', 'supergroup']:
         await update_known_chats(update.effective_chat.id, update.effective_chat.title)
         me = await context.bot.get_me()
@@ -306,7 +306,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await private_chat_entry_point(update, context)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update, context)
+    await add_user_to_participants(update, context)
     if update.effective_chat.type == 'private': await private_chat_entry_point(update, context)
     else: await update.message.reply_text('Команды: /start, /help. Управление опросами в ЛС.')
 
@@ -326,8 +326,8 @@ def build_group_dashboard_content(chat_id: int) -> (str, InlineKeyboardMarkup):
     text = f"Панель управления для чата *{escape_markdown(chat_title, 1)}*:"
     
     keyboard = [
-        [InlineKeyboardButton("📊 Активные опросы", callback_data=f'dash_polls_active_{chat_id}'),
-         InlineKeyboardButton("📈 Завершенные опросы", callback_data=f'dash_polls_closed_{chat_id}')],
+        [InlineKeyboardButton("📊 Активные опросы", callback_data=f'dash_polls_{chat_id}_active'),
+         InlineKeyboardButton("📈 Завершенные опросы", callback_data=f'dash_polls_{chat_id}_closed')],
         [InlineKeyboardButton("👥 Участники", callback_data=f'dash_participants_menu_{chat_id}')],
         [InlineKeyboardButton("✏️ Создать опрос", callback_data=f'dash_wizard_start_{chat_id}')],
         [InlineKeyboardButton("✍️ Редактировать голоса", callback_data=f'dash_edit_votes_polls_{chat_id}')],
@@ -826,6 +826,14 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
     data = query.data.split('_')
     command, params = data[1], data[2:]
     
+    # Normalize combined commands like 'wizard_start' or 'edit_votes_polls'
+    if command == "wizard" and params and params[0] == "start":
+        command = "wizard_start"
+        params = params[1:]
+    elif command == "edit" and len(params) >= 2 and params[0] == "votes" and params[1] == "polls":
+        command = "edit_votes_polls"
+        params = params[2:]
+
     if command == "group":
         if context.user_data: context.user_data.clear()
         await show_group_dashboard(query, context, int(params[0]))
@@ -902,8 +910,16 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
             await query.answer(f"Опрос {poll_id} удален.", show_alert=True)
             await show_poll_list(query, chat_id, status)
     elif command == "participants":
-        chat_id = int(params[0])
-        action = params[1]
+        # Allow both orders: <chat_id>_<action> or <action>_<chat_id>
+        if params[0].isdigit():
+            chat_id = int(params[0])
+            action = params[1] if len(params) > 1 else "menu"
+        else:
+            action = params[0]
+            chat_id = int(params[1]) if len(params) > 1 else None
+        if chat_id is None:
+            logger.error(f"Invalid participants callback data: {query.data}")
+            return
 
         if action == "menu":
             await show_participants_menu(query, chat_id)
@@ -937,15 +953,23 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
             else:
                 await query.answer("Участник не найден.", show_alert=True)
     elif command == 'wizard_start':
+        if not params:
+            logger.error(f"Invalid callback data for wizard_start: {query.data}")
+            return
+        chat_id = int(params[0])
         await wizard_start(query, context, chat_id)
     elif command == 'edit_votes_polls':
+        if not params:
+            logger.error(f"Invalid callback data for edit_votes_polls: {query.data}")
+            return
+        chat_id = int(params[0])
         await show_poll_list_for_editing(query, chat_id)
     else:
         logger.warning(f"Unknown dashboard action: {command}")
         await query.answer("Неизвестное действие.")
 
 async def vote_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    add_user_to_participants(update, context)
+    await add_user_to_participants(update, context)
     query = update.callback_query
     poll_id, option_index = map(int, query.data.split('_')[1:])
     user_id = query.from_user.id
@@ -1266,6 +1290,55 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     """Log any error that occurs."""
     logger.error("Exception while handling an update:", exc_info=context.error)
 
+async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle admin-related callback queries for editing votes."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split('_')
+
+    # Expected formats:
+    # admin_edit_poll_<poll_id>
+    # admin_edit_option_<poll_id>_<option_index>
+    # admin_user_page_<poll_id>_<option_index>_<page>
+    # admin_add_vote_<poll_id>_<option_index>_<user_id>
+
+    if len(parts) < 2:
+        logger.warning(f"Invalid admin callback data: {query.data}")
+        return
+
+    action = parts[1]
+
+    try:
+        # --- Navigate through edit menus ---
+        if action == "edit":
+            subtype = parts[2]
+            if subtype == "poll":
+                poll_id = int(parts[3])
+                await show_poll_options_for_editing(query, poll_id)
+            elif subtype == "option":
+                poll_id = int(parts[3])
+                option_index = int(parts[4])
+                await show_users_for_adding_vote(query, poll_id, option_index, page=0)
+
+        # --- Pagination for user list ---
+        elif action == "user" and parts[2] == "page":
+            poll_id = int(parts[3])
+            option_index = int(parts[4])
+            page = int(parts[5])
+            await show_users_for_adding_vote(query, poll_id, option_index, page)
+
+        # --- Add a vote on behalf of a user ---
+        elif action == "add" and parts[2] == "vote":
+            poll_id = int(parts[3])
+            option_index = int(parts[4])
+            user_id = int(parts[5])
+            await add_user_vote(query, poll_id, option_index, user_id, context)
+
+        else:
+            logger.warning(f"Unknown admin callback action: {query.data}")
+    except Exception as e:
+        logger.error(f"Error handling admin callback '{query.data}': {e}")
+
 def main() -> None:
     """Start the bot."""
     # Create the Application and pass it your bot's token.
@@ -1281,16 +1354,24 @@ def main() -> None:
     application.add_handler(CommandHandler("nudge", nudge_handler))
     application.add_handler(CommandHandler("movetobottom", move_to_bottom_handler))
     application.add_handler(CommandHandler("debug", toggle_debug))
+    application.add_handler(CommandHandler("backup", backup_command))
+    application.add_handler(CommandHandler("restore", restore_command))
+    application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
 
     application.add_handler(CallbackQueryHandler(dashboard_callback_handler, pattern='^dash_'))
-    application.add_handler(CallbackQueryHandler(vote_callback_handler, pattern='^vote_'))
+    application.add_handler(CallbackQueryHandler(vote_callback_handler, pattern='^poll_'))
     application.add_handler(CallbackQueryHandler(results_callback, pattern='^results_'))
-    application.add_handler(CallbackQueryHandler(refresh_results_callback, pattern='^refresh_'))
+    application.add_handler(CallbackQueryHandler(refresh_results_callback, pattern='^refreshresults_'))
     application.add_handler(CallbackQueryHandler(settings_callback_handler, pattern='^settings_'))
+    application.add_handler(CallbackQueryHandler(settings_callback_handler, pattern='^setresopt_'))
+    application.add_handler(CallbackQueryHandler(setresultoptions, pattern='^setresultoptionspoll_'))
+    application.add_handler(CallbackQueryHandler(poll_settings_handler, pattern='^setpollsettings_'))
     application.add_handler(CallbackQueryHandler(poll_settings_handler, pattern='^pollsettings_'))
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern='^admin_'))
 
-    application.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE_TO_CHAT_ID, forwarded_message_handler))
+    application.add_handler(CallbackQueryHandler(nudge_handler, pattern='^nudge_'))
+    application.add_handler(CallbackQueryHandler(move_to_bottom_handler, pattern='^movetobottom_'))
+    application.add_handler(MessageHandler(filters.FORWARDED, forwarded_message_handler))
 
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
 
