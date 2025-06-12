@@ -415,8 +415,7 @@ async def show_participants_list(query: CallbackQuery, context: ContextTypes.DEF
         await query.answer()
 
 async def show_exclude_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int, page: int = 0):
-    c.execute('SELECT user_id, MAX(first_name) as first, MAX(last_name) as last, MAX(username) as user, MAX(excluded) as ex FROM participants WHERE chat_id = ? GROUP BY user_id ORDER BY first, last', (chat_id,))
-    participants = c.fetchall()
+    participants = session.query(Participant).filter_by(chat_id=chat_id).order_by(Participant.first_name, Participant.last_name).all()
     
     title = get_group_title(chat_id)
 
@@ -474,37 +473,36 @@ async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE,
     )
 
 async def startpoll_from_dashboard(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int, chat_id: int):
-    c.execute('SELECT message, options FROM polls WHERE poll_id = ? AND status = ?', (poll_id, 'draft'))
-    result = c.fetchone()
-    if not result or not result[0] or not result[1]:
+    poll = session.query(Poll).filter_by(poll_id=poll_id, status='draft').first()
+    if not poll or not poll.message or not poll.options:
         await query.answer('Текст или варианты опроса не заданы.', show_alert=True)
         return
 
     initial_text = generate_poll_text(poll_id)
-    options = result[1].split(',')
+    options = poll.options.split(',')
     kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)]
     
     try:
         msg = await context.bot.send_message(chat_id=chat_id, text=initial_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
-        c.execute('UPDATE polls SET status = ?, message_id = ? WHERE poll_id = ?', ('active', msg.message_id, poll_id))
-        conn.commit()
+        poll.status = 'active'
+        poll.message_id = msg.message_id
+        session.commit()
         await query.answer(f'Опрос {poll_id} запущен.', show_alert=True)
     except Exception as e:
         logger.error(f"Ошибка запуска опроса {poll_id}: {e}")
         await query.answer(f'Ошибка: {e}', show_alert=True)
 
 async def close_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int):
-    c.execute('SELECT chat_id, message_id FROM polls WHERE poll_id = ? AND status = ?', (poll_id, 'active'))
-    poll_data = c.fetchone()
+    poll = session.query(Poll).filter_by(poll_id=poll_id, status='active').first()
 
-    if not poll_data:
+    if not poll:
         await query.answer("Опрос не найден или уже не активен.", show_alert=True)
         return
 
-    chat_id, message_id = poll_data
+    chat_id, message_id = poll.chat_id, poll.message_id
 
-    c.execute('UPDATE polls SET status = ? WHERE poll_id = ?', ('closed', poll_id))
-    conn.commit()
+    poll.status = 'closed'
+    session.commit()
 
     final_text = generate_poll_text(poll_id)
     try:
@@ -528,12 +526,11 @@ async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     poll_id = int(query.data.split('_')[1])
     
-    c.execute('SELECT options, chat_id, status FROM polls WHERE poll_id = ?', (poll_id,))
-    row = c.fetchone()
-    if not row:
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    if not poll:
         await query.answer('Опрос не найден.', show_alert=True)
         return
-    options, chat_id, status = row
+    options, chat_id, status = poll.options, poll.chat_id, poll.status
     
     kb = [[InlineKeyboardButton(f"Настроить: {opt.strip()}", callback_data=f'setresopt_{poll_id}_{i}_menu')] for i, opt in enumerate(options.split(','))]
     kb.append([InlineKeyboardButton("⚙️ Общие настройки опроса", callback_data=f"setpollsettings_{poll_id}_menu")])
@@ -585,14 +582,13 @@ async def nudge_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     poll_id = int(query.data.split('_')[1])
 
-    c.execute('SELECT chat_id, message_id, nudge_message_id FROM polls WHERE poll_id = ? AND status = ?', (poll_id, 'active'))
-    poll_data = c.fetchone()
+    poll = session.query(Poll).filter_by(poll_id=poll_id, status='active').first()
 
-    if not poll_data:
+    if not poll:
         await query.answer("Не удалось найти активный опрос.", show_alert=True)
         return
 
-    chat_id, poll_message_id, nudge_message_id = poll_data
+    chat_id, poll_message_id, nudge_message_id = poll.chat_id, poll.message_id, poll.nudge_message_id
     
     if nudge_message_id:
         await query.answer("Обновляю список...", show_alert=False)
@@ -608,8 +604,8 @@ async def nudge_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.MARKDOWN,
                 disable_notification=False
             )
-            c.execute('UPDATE polls SET nudge_message_id = ? WHERE poll_id = ?', (msg.message_id, poll_id))
-            conn.commit()
+            poll.nudge_message_id = msg.message_id
+            session.commit()
             logger.info(f"Created nudge message {msg.message_id} for poll {poll_id} as reply to {poll_message_id}")
             await show_results(update, context, poll_id)
         except Exception as e:
@@ -620,14 +616,13 @@ async def move_to_bottom_handler(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     poll_id = int(query.data.split('_')[1])
     
-    c.execute('SELECT chat_id, message_id, options FROM polls WHERE poll_id = ? AND status = ?', (poll_id, 'active'))
-    poll_data = c.fetchone()
+    poll = session.query(Poll).filter_by(poll_id=poll_id, status='active').first()
     
-    if not poll_data:
+    if not poll:
         await query.answer("Не удалось найти активный опрос.", show_alert=True)
         return
         
-    chat_id, old_message_id, options_str = poll_data
+    chat_id, old_message_id, options_str = poll.chat_id, poll.message_id, poll.options
     
     await query.answer("Перемещаю опрос...")
 
@@ -653,8 +648,8 @@ async def move_to_bottom_handler(update: Update, context: ContextTypes.DEFAULT_T
         )
         
         # 3. Update the message_id in the database
-        c.execute('UPDATE polls SET message_id = ? WHERE poll_id = ?', (new_message.message_id, poll_id))
-        conn.commit()
+        poll.message_id = new_message.message_id
+        session.commit()
         
     except Exception as e:
         logger.error(f"Failed to resend poll {poll_id} silently: {e}")
@@ -667,16 +662,15 @@ async def move_to_bottom_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 async def show_poll_list_for_editing(query: CallbackQuery, chat_id: int):
     """Показывает список опросов для редактирования голосов."""
-    c.execute("SELECT poll_id, message FROM polls WHERE chat_id = ? AND status = 'active' ORDER BY poll_id DESC", (chat_id,))
-    polls = c.fetchall()
+    polls = session.query(Poll).filter_by(chat_id=chat_id, status='active').order_by(Poll.poll_id.desc()).all()
     
     if not polls:
         await query.answer("В этом чате нет активных опросов для редактирования.", show_alert=True)
         return
 
     keyboard = []
-    for poll_id, message in polls:
-        keyboard.append([InlineKeyboardButton(message[:50], callback_data=f'admin_edit_poll_{poll_id}')])
+    for poll in polls:
+        keyboard.append([InlineKeyboardButton(poll.message[:50], callback_data=f'admin_edit_poll_{poll.poll_id}')])
     
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data=f'dash_show_{chat_id}')])
     
@@ -687,22 +681,18 @@ async def show_poll_list_for_editing(query: CallbackQuery, chat_id: int):
 
 async def show_poll_options_for_editing(query: CallbackQuery, poll_id: int):
     """Показывает варианты ответа в опросе для выбора."""
-    c.execute('SELECT options FROM polls WHERE poll_id = ?', (poll_id,))
-    res = c.fetchone()
-    if not res:
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    if not poll:
         await query.answer("Опрос не найден.", show_alert=True)
         return
-    options_str = res[0]
+    options_str = poll.options
     options = [opt.strip() for opt in options_str.split(',')]
     
     keyboard = []
     for i, option_text in enumerate(options):
         keyboard.append([InlineKeyboardButton(option_text, callback_data=f'admin_edit_option_{poll_id}_{i}')])
 
-    c.execute('SELECT chat_id FROM polls WHERE poll_id = ?', (poll_id,))
-    chat_id_res = c.fetchone()
-    if chat_id_res:
-        keyboard.append([InlineKeyboardButton("🔙 Назад к опросам", callback_data=f'dash_edit_votes_polls_{chat_id_res[0]}')])
+    keyboard.append([InlineKeyboardButton("🔙 Назад к опросам", callback_data=f'dash_edit_votes_polls_{poll.chat_id}')])
     
     await query.edit_message_text(
         "Выберите вариант ответа, чтобы добавить голос:",
@@ -711,25 +701,24 @@ async def show_poll_options_for_editing(query: CallbackQuery, poll_id: int):
 
 async def show_users_for_adding_vote(query: CallbackQuery, poll_id: int, option_index: int, page: int = 0):
     """Показывает список участников для добавления голоса."""
-    c.execute('SELECT chat_id, options FROM polls WHERE poll_id = ?', (poll_id,))
-    res = c.fetchone()
-    if not res:
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    if not poll:
         await query.answer("Опрос не найден.", show_alert=True)
         return
-    chat_id, options_str = res
+    chat_id, options_str = poll.chat_id, poll.options
     options = [opt.strip() for opt in options_str.split(',')]
     if option_index >= len(options):
         await query.answer("Неверный вариант ответа.", show_alert=True)
         return
     selected_option = options[option_index]
 
-    c.execute('SELECT user_id FROM participants WHERE chat_id = ? AND excluded = 0', (chat_id,))
-    all_participants = {row[0] for row in c.fetchall()}
+    participants = session.query(Participant).filter_by(chat_id=chat_id, excluded=0).all()
+    all_participant_ids = {p.user_id for p in participants}
 
-    c.execute('SELECT user_id FROM responses WHERE poll_id = ? AND response = ?', (poll_id, selected_option))
-    voted_users = {row[0] for row in c.fetchall()}
+    voted_users = session.query(Response).filter_by(poll_id=poll_id, response=selected_option).all()
+    voted_user_ids = {r.user_id for r in voted_users}
     
-    eligible_users = sorted(list(all_participants - voted_users), key=lambda uid: get_user_name(uid))
+    eligible_users = sorted(list(all_participant_ids - voted_user_ids), key=lambda uid: get_user_name(uid))
 
     if not eligible_users:
         await query.answer("Все участники чата уже проголосовали за этот вариант или исключены.", show_alert=True)
@@ -763,22 +752,24 @@ async def show_users_for_adding_vote(query: CallbackQuery, poll_id: int, option_
 
 async def add_user_vote(query: CallbackQuery, poll_id: int, option_index: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
     """Добавляет голос пользователя к варианту ответа."""
-    c.execute('SELECT options FROM polls WHERE poll_id = ?', (poll_id,))
-    res = c.fetchone()
-    if not res:
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    if not poll:
         await query.answer("Опрос не найден.", show_alert=True)
         return
         
-    options_str = res[0]
+    options_str = poll.options
     options = [opt.strip() for opt in options_str.split(',')]
     if option_index >= len(options):
         await query.answer("Неверный вариант ответа.", show_alert=True)
         return
     selected_option = options[option_index]
 
-    c.execute('DELETE FROM responses WHERE poll_id = ? AND user_id = ?', (poll_id, user_id))
-    c.execute('INSERT INTO responses (poll_id, user_id, response) VALUES (?, ?, ?)', (poll_id, user_id, selected_option))
-    conn.commit()
+    existing_response = session.query(Response).filter_by(poll_id=poll_id, user_id=user_id).first()
+    if existing_response:
+        session.delete(existing_response)
+    new_response = Response(poll_id=poll_id, user_id=user_id, response=selected_option)
+    session.add(new_response)
+    session.commit()
 
     user_name = get_user_name(user_id)
     await query.answer(f"Голос от {user_name} добавлен за '{selected_option}'.")
@@ -839,11 +830,17 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
         chat_id_to_add = int(params[0])
         user_data = context.user_data['user_to_add_via_forward']
 
-        c.execute(
-            'INSERT OR IGNORE INTO participants (chat_id, user_id, username, first_name, last_name) VALUES (?, ?, ?, ?, ?)',
-            (chat_id_to_add, user_data['id'], user_data['username'], user_data['first_name'], user_data['last_name'])
-        )
-        conn.commit()
+        existing_participant = session.query(Participant).filter_by(chat_id=chat_id_to_add, user_id=user_data['id']).first()
+        if not existing_participant:
+            new_participant = Participant(
+                chat_id=chat_id_to_add, 
+                user_id=user_data['id'], 
+                username=user_data['username'], 
+                first_name=user_data['first_name'], 
+                last_name=user_data['last_name']
+            )
+            session.add(new_participant)
+            session.commit()
 
         user_name = user_data['first_name'] or f"@{user_data['username']}"
         group_title = get_group_title(chat_id_to_add)
@@ -854,20 +851,18 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
         await show_group_dashboard(query, context, chat_id_to_add)
     elif command == "startpoll":
         poll_id = int(params[0])
-        c.execute('SELECT chat_id FROM polls WHERE poll_id = ?', (poll_id,))
-        res = c.fetchone()
-        if res:
-            await startpoll_from_dashboard(query, context, poll_id, res[0])
-            await show_group_dashboard(query, context, res[0])
+        poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+        if poll:
+            await startpoll_from_dashboard(query, context, poll_id, poll.chat_id)
+            await show_group_dashboard(query, context, poll.chat_id)
     elif command == "closepoll":
         poll_id = int(params[0])
         await close_poll(query, context, poll_id)
     elif command == "delnudge":
         poll_id = int(params[0])
-        c.execute('SELECT chat_id, nudge_message_id FROM polls WHERE poll_id = ?', (poll_id,))
-        res = c.fetchone()
-        if res:
-            chat_id, nudge_message_id = res
+        poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+        if poll:
+            chat_id, nudge_message_id = poll.chat_id, poll.nudge_message_id
             if nudge_message_id:
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=nudge_message_id)
@@ -876,18 +871,19 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
                     logger.warning(f"Could not delete nudge message {nudge_message_id}: {e}")
                     await query.answer("Не удалось удалить сообщение.", show_alert=True)
                 
-                c.execute('UPDATE polls SET nudge_message_id = NULL WHERE poll_id = ?', (poll_id,))
-                conn.commit()
+                poll.nudge_message_id = None
+                session.commit()
         await show_results(update, context, poll_id)
     elif command == "deletepoll":
         poll_id = int(params[0])
-        c.execute('SELECT chat_id, status FROM polls WHERE poll_id = ?', (poll_id,))
-        res = c.fetchone()
-        if res:
-            chat_id, status = res
-            for table in ['polls', 'responses', 'poll_settings', 'poll_option_settings']:
-                c.execute(f'DELETE FROM {table} WHERE poll_id = ?', (poll_id,))
-            conn.commit()
+        poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+        if poll:
+            chat_id, status = poll.chat_id, poll.status
+            session.query(Response).filter_by(poll_id=poll_id).delete()
+            session.query(PollSetting).filter_by(poll_id=poll_id).delete()
+            session.query(PollOptionSetting).filter_by(poll_id=poll_id).delete()
+            session.delete(poll)
+            session.commit()
             await query.answer(f"Опрос {poll_id} удален.", show_alert=True)
             await show_poll_list(query, chat_id, status)
     elif command == "participants":
@@ -912,8 +908,8 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
             page = int(params[2]) if len(params) > 2 else 0
             await show_exclude_menu(query, context, chat_id, page)
         elif action == "clean":
-            c.execute('DELETE FROM participants WHERE chat_id = ?', (chat_id,))
-            conn.commit()
+            session.query(Participant).filter_by(chat_id=chat_id).delete()
+            session.commit()
             await query.answer(f'Список участников для "{get_group_title(chat_id)}" очищен.', show_alert=True)
             await show_participants_menu(query, chat_id)
         elif action == "toggle":
@@ -923,14 +919,12 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
             user_to_toggle = int(params[2])
             page = int(params[3]) if len(params) > 3 else 0
             
-            c.execute('SELECT MAX(excluded) FROM participants WHERE chat_id = ? AND user_id = ? GROUP BY user_id', (chat_id, user_to_toggle))
-            res = c.fetchone()
-
-            if res:
-                current_status = res[0] or 0
+            participant = session.query(Participant).filter_by(chat_id=chat_id, user_id=user_to_toggle).first()
+            if participant:
+                current_status = participant.excluded or 0
                 new_status = 1 - current_status
-                c.execute('UPDATE participants SET excluded = ? WHERE chat_id = ? AND user_id = ?', (new_status, chat_id, user_to_toggle))
-                conn.commit()
+                participant.excluded = new_status
+                session.commit()
                 await show_exclude_menu(query, context, chat_id, page)
             else:
                 await query.answer("Участник не найден.", show_alert=True)
@@ -957,26 +951,25 @@ async def vote_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     poll_id, option_index = map(int, query.data.split('_')[1:])
     user_id = query.from_user.id
 
-    c.execute('SELECT options, status FROM polls WHERE poll_id = ?', (poll_id,))
-    row = c.fetchone()
-    if not row or row[1] != 'active':
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    if not poll or poll.status != 'active':
         await query.answer("Опрос неактивен.", show_alert=True)
         return
         
-    response_text = row[0].split(',')[option_index].strip()
-    c.execute('SELECT response FROM responses WHERE poll_id = ? AND user_id = ?', (poll_id, user_id))
-    existing = c.fetchone()
+    response_text = poll.options.split(',')[option_index].strip()
+    existing_response = session.query(Response).filter_by(poll_id=poll_id, user_id=user_id).first()
 
-    if existing and existing[0] == response_text:
-        c.execute('DELETE FROM responses WHERE poll_id = ? AND user_id = ?', (poll_id, user_id))
+    if existing_response and existing_response.response == response_text:
+        session.delete(existing_response)
         await query.answer(f"Голос за '{response_text}' отозван.")
-    elif existing:
-        c.execute('UPDATE responses SET response = ? WHERE poll_id = ? AND user_id = ?', (response_text, poll_id, user_id))
+    elif existing_response:
+        existing_response.response = response_text
         await query.answer(f"Ответ изменен на '{response_text}'.")
     else:
-        c.execute('INSERT INTO responses (poll_id, user_id, response) VALUES (?, ?, ?)', (poll_id, user_id, response_text))
+        new_response = Response(poll_id=poll_id, user_id=user_id, response=response_text)
+        session.add(new_response)
         await query.answer(f"Ответ '{response_text}' принят!")
-    conn.commit()
+    session.commit()
     
     await update_poll_message(poll_id, context)
     await update_nudge_message(poll_id, context)
@@ -995,9 +988,15 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
     data = query.data.split('_')
     poll_id, option_index, command = int(data[1]), int(data[2]), data[3]
     
-    c.execute('INSERT OR IGNORE INTO poll_settings (poll_id) VALUES (?)', (poll_id,))
-    c.execute('INSERT OR IGNORE INTO poll_option_settings (poll_id, option_index) VALUES (?, ?)', (poll_id, option_index))
-    conn.commit() # Commit insertions
+    poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
+    if not poll_setting:
+        poll_setting = PollSetting(poll_id=poll_id)
+        session.add(poll_setting)
+    opt_setting = session.query(PollOptionSetting).filter_by(poll_id=poll_id, option_index=option_index).first()
+    if not opt_setting:
+        opt_setting = PollOptionSetting(poll_id=poll_id, option_index=option_index)
+        session.add(opt_setting)
+    session.commit() # Commit insertions
     
     if command == "menu":
         await show_option_settings_menu(query, context, poll_id, option_index)
@@ -1012,13 +1011,13 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         prompts = {'setemoji': 'Отправьте смайлик:', 'setcontribution': 'Отправьте сумму взноса:', 'edittext': 'Отправьте новый текст варианта:'}
         await query.message.edit_text(prompts[command], reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"setresopt_{poll_id}_{option_index}_menu")]]))
         return
-    elif command == "shownames": c.execute('UPDATE poll_option_settings SET show_names = ? WHERE poll_id = ? AND option_index = ?', (int(data[4]), poll_id, option_index))
-    elif command == "priority": c.execute('UPDATE poll_option_settings SET is_priority = ? WHERE poll_id = ? AND option_index = ?', (int(data[4]), poll_id, option_index))
-    elif command == "namesstyle": c.execute('UPDATE poll_option_settings SET names_style = ? WHERE poll_id = ? AND option_index = ?', (data[4], poll_id, option_index))
-    elif command == "showcount": c.execute('UPDATE poll_option_settings SET show_count = ? WHERE poll_id = ? AND option_index = ?', (int(data[4]), poll_id, option_index))
-    elif command == "showcontribution": c.execute('UPDATE poll_option_settings SET show_contribution = ? WHERE poll_id = ? AND option_index = ?', (int(data[4]), poll_id, option_index))
+    elif command == "shownames": opt_setting.show_names = int(data[4])
+    elif command == "priority": opt_setting.is_priority = int(data[4])
+    elif command == "namesstyle": opt_setting.names_style = data[4]
+    elif command == "showcount": opt_setting.show_count = int(data[4])
+    elif command == "showcontribution": opt_setting.show_contribution = int(data[4])
     
-    conn.commit()
+    session.commit()
     await show_option_settings_menu(query, context, poll_id, option_index)
 
 async def poll_settings_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1027,8 +1026,11 @@ async def poll_settings_handler(update: Update, context: ContextTypes.DEFAULT_TY
     data = query.data.split('_')
     poll_id, command = int(data[1]), data[2]
 
-    c.execute('INSERT OR IGNORE INTO poll_settings (poll_id) VALUES (?)', (poll_id,))
-    conn.commit()
+    poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
+    if not poll_setting:
+        poll_setting = PollSetting(poll_id=poll_id)
+        session.add(poll_setting)
+        session.commit()
 
     if command == "menu":
         await show_poll_settings_menu(query, context, poll_id)
@@ -1063,9 +1065,8 @@ async def poll_settings_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await show_nudge_emoji_menu(query, context, poll_id)
 
 async def show_nudge_emoji_menu(query: Union[CallbackQuery, None], context: ContextTypes.DEFAULT_TYPE, poll_id: int, message_id: int = None, chat_id: int = None):
-    c.execute('SELECT nudge_negative_emoji FROM poll_settings WHERE poll_id = ?', (poll_id,))
-    res = c.fetchone()
-    neg_emoji = (res[0] if res and res[0] else '❌')
+    poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
+    neg_emoji = (poll_setting.nudge_negative_emoji if poll_setting and poll_setting.nudge_negative_emoji else '❌')
 
     text = "Настройте эмодзи для списка оповещений (для тех, кто не проголосовал):"
     kb = [
@@ -1079,22 +1080,20 @@ async def show_nudge_emoji_menu(query: Union[CallbackQuery, None], context: Cont
         await context.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=InlineKeyboardMarkup(kb))
 
 async def show_option_settings_menu(query: Union[CallbackQuery, None], context: ContextTypes.DEFAULT_TYPE, poll_id: int, option_index: int, message_id: int = None, chat_id: int = None):
-    c.execute('SELECT options FROM polls WHERE poll_id = ?', (poll_id,))
-    option_text = c.fetchone()[0].split(',')[option_index].strip()
-    c.execute('SELECT default_show_names, default_show_count FROM poll_settings WHERE poll_id = ?', (poll_id,))
-    res = c.fetchone()
-    default_show_names, default_show_count = (res or (1, 1))
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    option_text = poll.options.split(',')[option_index].strip()
+    poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
+    default_show_names, default_show_count = (1, 1) if not poll_setting else (poll_setting.default_show_names, poll_setting.default_show_count)
     
-    c.execute('SELECT show_names, emoji, is_priority, contribution_amount, names_style, show_count, show_contribution FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, option_index))
-    opt_settings = c.fetchone()
+    opt_setting = session.query(PollOptionSetting).filter_by(poll_id=poll_id, option_index=option_index).first()
     
-    show_names = default_show_names if not opt_settings or opt_settings[0] is None else opt_settings[0]
-    emoji = (opt_settings[1] or "Не задан") if opt_settings else "Не задан"
-    is_priority = (opt_settings[2] or 0) if opt_settings else 0
-    contribution = (opt_settings[3] or 0) if opt_settings else 0
-    names_style = (opt_settings[4] or 'list') if opt_settings and opt_settings[4] else 'list'
-    show_count = default_show_count if not opt_settings or opt_settings[5] is None else opt_settings[5]
-    show_contribution = 1 if not opt_settings or opt_settings[6] is None else opt_settings[6]
+    show_names = default_show_names if not opt_setting or opt_setting.show_names is None else opt_setting.show_names
+    emoji = (opt_setting.emoji or "Не задан") if opt_setting and opt_setting.emoji else "Не задан"
+    is_priority = (opt_setting.is_priority or 0) if opt_setting else 0
+    contribution = (opt_setting.contribution_amount or 0) if opt_setting else 0
+    names_style = (opt_setting.names_style or 'list') if opt_setting and opt_setting.names_style else 'list'
+    show_count = default_show_count if not opt_setting or opt_setting.show_count is None else opt_setting.show_count
+    show_contribution = 1 if not opt_setting or opt_setting.show_contribution is None else opt_setting.show_contribution
 
     text = f"Настройки для: *{option_text}*"
 
@@ -1135,10 +1134,13 @@ async def show_option_settings_menu(query: Union[CallbackQuery, None], context: 
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
 async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: ContextTypes.DEFAULT_TYPE, poll_id: int, message_id: int = None, chat_id: int = None):
-    c.execute('INSERT OR IGNORE INTO poll_settings (poll_id) VALUES (?)', (poll_id,))
-    c.execute('SELECT target_sum FROM poll_settings WHERE poll_id = ?', (poll_id,))
-    settings = c.fetchone()
-    target_sum = (settings[0] if settings and settings[0] is not None else 0)
+    poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
+    if not poll_setting:
+        poll_setting = PollSetting(poll_id=poll_id)
+        session.add(poll_setting)
+        session.commit()
+
+    target_sum = (poll_setting.target_sum if poll_setting and poll_setting.target_sum is not None else 0)
 
     text = f"⚙️ *Общие настройки опроса {poll_id}*"
     kb = [
@@ -1189,8 +1191,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             poll_title = app_user_data['wizard_title']
-            c.execute('INSERT INTO polls (chat_id, message, status, options) VALUES (?, ?, ?, ?)', (chat_id_for_dashboard, poll_title, 'draft', ','.join(options)))
-            conn.commit()
+            new_poll = Poll(chat_id=chat_id_for_dashboard, message=poll_title, status='draft', options=','.join(options))
+            session.add(new_poll)
+            session.commit()
             
             await message.delete()
             await context.bot.delete_message(chat_id=user_id, message_id=wizard_message_id)
@@ -1208,29 +1211,54 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_input = message.text.strip()
 
         if settings_state == 'waiting_for_setemoji':
-            c.execute('UPDATE poll_option_settings SET emoji = ? WHERE poll_id = ? AND option_index = ?', (text_input, poll_id, app_user_data['option_index']))
+            opt_setting = session.query(PollOptionSetting).filter_by(poll_id=poll_id, option_index=app_user_data['option_index']).first()
+            if not opt_setting:
+                opt_setting = PollOptionSetting(poll_id=poll_id, option_index=app_user_data['option_index'], emoji=text_input)
+                session.add(opt_setting)
+            else:
+                opt_setting.emoji = text_input
         elif settings_state == 'waiting_for_edittext':
-            c.execute('SELECT options FROM polls WHERE poll_id = ?', (poll_id,))
-            options_list = c.fetchone()[0].split(',')
+            poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+            options_list = poll.options.split(',')
             old_text = options_list[app_user_data['option_index']].strip()
             options_list[app_user_data['option_index']] = text_input
-            c.execute('UPDATE polls SET options = ? WHERE poll_id = ?', (','.join(options_list), poll_id))
-            c.execute('UPDATE responses SET response = ? WHERE poll_id = ? AND response = ?', (text_input, poll_id, old_text))
+            poll.options = ','.join(options_list)
+            responses = session.query(Response).filter_by(poll_id=poll_id, response=old_text).all()
+            for resp in responses:
+                resp.response = text_input
         elif settings_state == 'waiting_for_setcontribution':
             try:
-                c.execute('UPDATE poll_option_settings SET contribution_amount = ? WHERE poll_id = ? AND option_index = ?', (float(text_input), poll_id, app_user_data['option_index']))
+                contribution_value = float(text_input)
+                opt_setting = session.query(PollOptionSetting).filter_by(poll_id=poll_id, option_index=app_user_data['option_index']).first()
+                if not opt_setting:
+                    opt_setting = PollOptionSetting(poll_id=poll_id, option_index=app_user_data['option_index'], contribution_amount=contribution_value)
+                    session.add(opt_setting)
+                else:
+                    opt_setting.contribution_amount = contribution_value
             except (ValueError, TypeError): pass # Ignore invalid input, just show menu again
         elif settings_state == 'waiting_for_target_sum':
             try:
-                c.execute('UPDATE poll_settings SET target_sum = ? WHERE poll_id = ?', (float(text_input), poll_id))
+                target_sum_value = float(text_input)
+                poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
+                if not poll_setting:
+                    poll_setting = PollSetting(poll_id=poll_id, target_sum=target_sum_value)
+                    session.add(poll_setting)
+                else:
+                    poll_setting.target_sum = target_sum_value
             except (ValueError, TypeError): pass # Ignore invalid input
         elif settings_state == 'waiting_for_poll_text':
             if text_input:
-                c.execute('UPDATE polls SET message = ? WHERE poll_id = ?', (text_input, poll_id))
+                poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+                poll.message = text_input
         elif settings_state == 'waiting_for_nudge_neg':
-             c.execute('UPDATE poll_settings SET nudge_negative_emoji = ? WHERE poll_id = ?', (text_input, poll_id))
+             poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
+             if not poll_setting:
+                 poll_setting = PollSetting(poll_id=poll_id, nudge_negative_emoji=text_input)
+                 session.add(poll_setting)
+             else:
+                 poll_setting.nudge_negative_emoji = text_input
 
-        conn.commit()
+        session.commit()
         
         option_index_to_restore = app_user_data.get('option_index')
         context.user_data.clear()
