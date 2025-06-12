@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import time
 from typing import Union
 
@@ -10,7 +11,7 @@ from telegram.constants import ParseMode, ChatAction
 from telegram.error import ChatMigrated
 from telegram.helpers import escape_markdown
 
-from src.database import init_database, run_migration, add_user_to_participants as db_add_user, update_known_chats as db_update_chats, get_group_title as db_get_group_title, get_user_name as db_get_user_name, session, Poll, Response, PollSetting, PollOptionSetting, Participant, KnownChat
+from src.database import init_database, run_migration, add_user_to_participants as db_add_user, update_known_chats as db_update_chats, get_group_title as db_get_group_title, get_user_name as db_get_user_name, session, Poll, Response, PollSetting, PollOptionSetting, Participant, KnownChat, User
 
 # Load environment variables from .env file
 load_dotenv()
@@ -99,14 +100,47 @@ def get_group_title(chat_id: int) -> str:
     return db_get_group_title(chat_id)
 
 def get_user_name(user_id: int, markdown_link: bool = False) -> str:
-    return db_get_user_name(user_id, markdown_link)
+    user = session.query(User).filter_by(user_id=user_id).first()
+    participants = session.query(Participant).filter_by(user_id=user_id).all()
+    participant_data = [p.__dict__ for p in participants] if participants else None
+    logger.info(f"[DEBUG] User data for ID {user_id}: User table - {user.__dict__ if user else None}, Participant table (all entries) - {participant_data}")
+    if user:
+        name = user.first_name or ''
+        if user.last_name:
+            name += f' {user.last_name}'
+        name = name.strip()
+        if not name:
+            name = user.username or f'User {user_id}'
+    elif participants:
+        # Use the first participant entry as fallback
+        participant = participants[0]
+        name = participant.first_name or ''
+        if participant.last_name:
+            name += f' {participant.last_name}'
+        name = name.strip()
+        if not name:
+            name = participant.username or f'User {user_id}'
+    else:
+        name = f'User {user_id}'
+    
+    clean_name = re.sub(r'[^\w\s]', '', name).strip()
+    if not clean_name: # Fallback if name becomes empty after cleaning
+        clean_name = f'User {user_id}'
+
+    logger.info(f"[DEBUG] Constructed name for ID {user_id}: '{name}', Cleaned: '{clean_name}', Markdown link requested: {markdown_link}")
+    
+    if markdown_link:
+        formatted_name = f'[{escape_markdown(clean_name, version=2)}](tg://user?id={user_id})'
+        logger.info(f"[DEBUG] Formatted Markdown link for ID {user_id}: '{formatted_name}'")
+        return formatted_name
+    return clean_name
 
 def get_progress_bar(progress, total, length=20):
-    if total <= 0: return "[]", 0
+    if total <= 0: return "\\[\\]", 0
     percent = progress / total
     filled_length = int(length * percent)
     bar = '█' * filled_length + '░' * (length - filled_length)
-    return f"[{bar}]", percent * 100
+    return f"\\[{bar}\\]", percent * 100
 
 # --- Poll Display Logic ---
 
@@ -133,7 +167,7 @@ def generate_poll_text(poll_id: int) -> str:
     
     total_votes = len(responses)
     total_collected = 0
-    text_parts = [escape_markdown(message, version=1), ""]
+    text_parts = [escape_markdown(message, version=2), ""]
 
     options_with_settings = []
     for i, option_text in enumerate(original_options):
@@ -158,11 +192,11 @@ def generate_poll_text(poll_id: int) -> str:
         if contribution > 0: total_collected += count * contribution
             
         marker = "⭐ " if option_data['is_priority'] else ""
-        escaped_option_text = escape_markdown(option_text, version=1)
+        escaped_option_text = escape_markdown(option_text, version=2)
         formatted_text = f"*{escaped_option_text}*" if option_data['is_priority'] else escaped_option_text
         line = f"{marker}{formatted_text}"
         if contribution > 0 and option_data['show_contribution']:
-            line += f" (по {int(contribution)})"
+            line += f" \\(по {int(contribution)}\\)"
         if option_data['show_count']:
             line += f": *{count}*"
         text_parts.append(line)
@@ -170,22 +204,26 @@ def generate_poll_text(poll_id: int) -> str:
         if option_data['show_names'] and count > 0:
             responders = [r.user_id for r in responses if r.response == option_text]
             user_names = [get_user_name(uid, markdown_link=True) for uid in responders]
+            logger.info(f"[DEBUG] User names for option '{option_text}' in poll {poll_id}: {user_names}")
             names_list = [f"{option_data['emoji']}{name}" for name in user_names]
             indent = "    "
             if option_data['names_style'] == 'list': text_parts.append("\n".join(f"{indent}{name}" for name in names_list))
             elif option_data['names_style'] == 'inline': text_parts.append(f'{indent}{", ".join(names_list)}')
-            elif option_data['names_style'] == 'numbered': text_parts.append("\n".join(f"{indent}{i}. {name}" for i, name in enumerate(names_list, 1)))
+            elif option_data['names_style'] == 'numbered': text_parts.append("\n".join(f"{indent}{i}\\. {name}" for i, name in enumerate(names_list, 1)))
         text_parts.append("")
 
     if target_sum > 0:
         bar, percent = get_progress_bar(total_collected, target_sum)
-        text_parts.append(f"💰 Собрано: *{int(total_collected)} из {int(target_sum)}* ({percent:.1f}%)\n{bar}")
+        formatted_percent = f"{percent:.1f}".replace('.', '\\.')
+        text_parts.append(f"💰 Собрано: *{int(total_collected)} из {int(target_sum)}* \\({formatted_percent}%\\)\n{bar}")
     elif total_collected > 0:
         text_parts.append(f"💰 Собрано: *{int(total_collected)}*")
     
     while text_parts and text_parts[-1] == "": text_parts.pop()
     text_parts.append(f"\nВсего проголосовало: *{total_votes}*")
-    return "\n".join(text_parts)
+    final_text = "\n".join(text_parts)
+    logger.info(f"[DEBUG] Final poll text for poll {poll_id}:\n{final_text}")
+    return final_text
 
 async def generate_nudge_text(poll_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
     poll = session.query(Poll).filter_by(poll_id=poll_id).first()
@@ -232,7 +270,7 @@ async def update_nudge_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE)
             text=new_text,
             chat_id=chat_id,
             message_id=nudge_message_id,
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         logger.info(f"Successfully updated nudge message {nudge_message_id} for poll {poll_id}")
     except Exception as e:
@@ -254,7 +292,7 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(opt, callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)]
     
     try:
-        await context.bot.edit_message_text(text=new_text, chat_id=chat_id, message_id=message_id, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
+        await context.bot.edit_message_text(text=new_text, chat_id=chat_id, message_id=message_id, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
     except ChatMigrated as e:
         logger.warning(f"Chat migrated for poll {poll_id}. Old: {chat_id}, New: {e.new_chat_id}")
         poll.chat_id = e.new_chat_id
@@ -290,7 +328,7 @@ async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def build_group_dashboard_content(chat_id: int, user_id: int) -> (str, InlineKeyboardMarkup):
     chat_title = get_group_title(chat_id)
-    text = f"Панель управления для чата *{escape_markdown(chat_title, 1)}*:"
+    text = f"Панель управления для чата *{escape_markdown(chat_title, 2)}*:"
     
     keyboard = [
         [InlineKeyboardButton("📊 Активные опросы", callback_data=f'dash_polls_{chat_id}_active'),
@@ -320,7 +358,7 @@ async def private_chat_entry_point(update: Update, context: ContextTypes.DEFAULT
 
 async def show_group_dashboard(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     text, keyboard = build_group_dashboard_content(chat_id, query.from_user.id)
-    await query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
+    await query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN_V2)
 
 async def show_poll_list(query: CallbackQuery, chat_id: int, status: str):
     polls = session.query(Poll).filter_by(chat_id=chat_id, status=status).order_by(Poll.poll_id.desc()).all()
@@ -352,22 +390,23 @@ async def show_poll_list(query: CallbackQuery, chat_id: int, status: str):
                 InlineKeyboardButton("🗑", callback_data=f"dash_deletepoll_{poll.poll_id}")
             ])
     kb.append([InlineKeyboardButton("↩️ Назад", callback_data=f"dash_group_{chat_id}")])
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
 
 async def show_participants_menu(query: CallbackQuery, chat_id: int):
-    text = f'👥 *Управление участниками ("{get_group_title(chat_id)}")*'
+    title = escape_markdown(get_group_title(chat_id), 2)
+    text = f'👥 *Управление участниками \\("{title}"\\)*'
     kb = [
         [InlineKeyboardButton("📄 Показать список", callback_data=f"dash_participants_{chat_id}_list")],
         [InlineKeyboardButton("🚫 Исключить/вернуть", callback_data=f"dash_participants_{chat_id}_exclude")],
         [InlineKeyboardButton("🧹 Очистить список", callback_data=f"dash_participants_{chat_id}_clean")],
         [InlineKeyboardButton("↩️ Назад", callback_data=f"dash_group_{chat_id}")]
     ]
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
 
 async def show_participants_list(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int, page: int = 0):
     participants = session.query(Participant).filter_by(chat_id=chat_id).order_by(Participant.first_name, Participant.last_name).all()
     
-    title = get_group_title(chat_id)
+    title = escape_markdown(get_group_title(chat_id), 2)
 
     if not participants:
         text = f"В чате «{title}» нет зарегистрированных участников."
@@ -381,7 +420,7 @@ async def show_participants_list(query: CallbackQuery, context: ContextTypes.DEF
     paginated_participants = participants[start_index:end_index]
     total_pages = -(-len(participants) // items_per_page)
 
-    text_parts = [f'👥 *Список участников («{title}»)* (Стр. {page + 1}/{total_pages}):\n']
+    text_parts = [f'👥 *Список участников \\(«{title}»\\)* \\(Стр\\. {page + 1}/{total_pages}\\):\n']
     
     for i, participant in enumerate(paginated_participants, start=start_index + 1):
         name = participant.first_name or ''
@@ -389,9 +428,9 @@ async def show_participants_list(query: CallbackQuery, context: ContextTypes.DEF
         name = name.strip()
         if not name: name = f'@{participant.username}' if participant.username else "Без имени"
         
-        name = escape_markdown(name, version=1)
-        status = " (🚫)" if participant.excluded else ""
-        text_parts.append(f"{i}. {name}{status}")
+        name = escape_markdown(name, version=2)
+        status = " \\(🚫\\)" if participant.excluded else ""
+        text_parts.append(f"{i}\\. {name}{status}")
     
     text = "\n".join(text_parts)
     
@@ -408,7 +447,7 @@ async def show_participants_list(query: CallbackQuery, context: ContextTypes.DEF
     kb_rows.append([InlineKeyboardButton("↩️ В меню", callback_data=f"dash_participants_{chat_id}_menu")])
     
     try:
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.MARKDOWN)
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         if "Message is not modified" not in str(e):
             logger.error(f"Error showing participants list: {e}")
@@ -417,7 +456,7 @@ async def show_participants_list(query: CallbackQuery, context: ContextTypes.DEF
 async def show_exclude_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int, page: int = 0):
     participants = session.query(Participant).filter_by(chat_id=chat_id).order_by(Participant.first_name, Participant.last_name).all()
     
-    title = get_group_title(chat_id)
+    title = escape_markdown(get_group_title(chat_id), 2)
 
     if not participants:
         text = f"В чате «{title}» нет зарегистрированных участников для исключения."
@@ -431,7 +470,7 @@ async def show_exclude_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_
     paginated_participants = participants[start_index:end_index]
     total_pages = -(-len(participants) // items_per_page)
 
-    text = f'👥 *Исключение/возврат («{title}»)* (Стр. {page + 1}/{total_pages}):\nНажмите на участника, чтобы изменить его статус.'
+    text = f'👥 *Исключение/возврат \\(«{title}»\\)* \\(Стр\\. {page + 1}/{total_pages}\\):\nНажмите на участника, чтобы изменить его статус.'
     
     kb = []
     for user_id, first_name, last_name, username, excluded in paginated_participants:
@@ -456,7 +495,7 @@ async def show_exclude_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_
 
     kb.append([InlineKeyboardButton("↩️ Назад", callback_data=f"dash_participants_{chat_id}_menu")])
     
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
 
 async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     user_id = query.from_user.id
@@ -468,7 +507,7 @@ async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE,
     })
     await query.message.edit_text(
         "✨ *Мастер создания (1/2)*: Отправьте заголовок опроса.",
-        parse_mode=ParseMode.MARKDOWN,
+        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash_group_{chat_id}")]])
     )
 
@@ -483,7 +522,7 @@ async def startpoll_from_dashboard(query: CallbackQuery, context: ContextTypes.D
     kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)]
     
     try:
-        msg = await context.bot.send_message(chat_id=chat_id, text=initial_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+        msg = await context.bot.send_message(chat_id=chat_id, text=initial_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
         poll.status = 'active'
         poll.message_id = msg.message_id
         session.commit()
@@ -512,7 +551,7 @@ async def close_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
                 message_id=message_id,
                 text=final_text,
                 reply_markup=None,
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN_V2
             )
         await query.answer("Опрос завершён.", show_alert=True)
     except Exception as e:
@@ -569,7 +608,7 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
     kb_rows.append([InlineKeyboardButton("↩️ К списку", callback_data=f"dash_polls_{group_chat_id}_{status}")])
     
     try:
-        await query.edit_message_text(text=result_text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.MARKDOWN)
+        await query.edit_message_text(text=result_text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.MARKDOWN_V2)
         if query.data.startswith('refreshresults_'):
             await query.answer("Результаты обновлены.")
     except Exception as e:
@@ -601,7 +640,7 @@ async def nudge_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=chat_id,
                 text=nudge_text,
                 reply_to_message_id=poll_message_id,
-                parse_mode=ParseMode.MARKDOWN,
+                parse_mode=ParseMode.MARKDOWN_V2,
                 disable_notification=False
             )
             poll.nudge_message_id = msg.message_id
@@ -643,7 +682,7 @@ async def move_to_bottom_handler(update: Update, context: ContextTypes.DEFAULT_T
             chat_id=chat_id,
             text=new_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.MARKDOWN_V2,
             disable_notification=True
         )
         
@@ -745,9 +784,9 @@ async def show_users_for_adding_vote(query: CallbackQuery, poll_id: int, option_
     keyboard.append([InlineKeyboardButton("🔙 Назад к вариантам", callback_data=f'admin_edit_poll_{poll_id}')])
 
     await query.edit_message_text(
-        f"Выберите пользователя, чтобы добавить его голос за '{escape_markdown(selected_option, 1)}':",
+        f"Выберите пользователя, чтобы добавить его голос за '{escape_markdown(selected_option, 2)}':",
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=ParseMode.MARKDOWN_V2
     )
 
 async def add_user_vote(query: CallbackQuery, poll_id: int, option_index: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
@@ -968,6 +1007,7 @@ async def vote_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     else:
         new_response = Response(poll_id=poll_id, user_id=user_id, response=response_text)
         session.add(new_response)
+        session.commit()
         await query.answer(f"Ответ '{response_text}' принят!")
     session.commit()
     
@@ -1095,7 +1135,7 @@ async def show_option_settings_menu(query: Union[CallbackQuery, None], context: 
     show_count = default_show_count if not opt_setting or opt_setting.show_count is None else opt_setting.show_count
     show_contribution = 1 if not opt_setting or opt_setting.show_contribution is None else opt_setting.show_contribution
 
-    text = f"Настройки для: *{option_text}*"
+    text = f"Настройки для: *{escape_markdown(option_text, 2)}*"
 
     if names_style == 'list':
         style_text = "Списком"
@@ -1124,14 +1164,14 @@ async def show_option_settings_menu(query: Union[CallbackQuery, None], context: 
         ],
         [
             InlineKeyboardButton("📝 Изменить текст", callback_data=f"setresopt_{poll_id}_{option_index}_edittext"),
-            InlineKeyboardButton(f"Смайлик: {emoji}", callback_data=f"setresopt_{poll_id}_{option_index}_setemoji")
+            InlineKeyboardButton(f"Смайлик: {escape_markdown(emoji, 2)}", callback_data=f"setresopt_{poll_id}_{option_index}_setemoji")
         ],
         [InlineKeyboardButton("↩️ Назад", callback_data=f"setresultoptionspoll_{poll_id}")]
     ]
     if message_id and chat_id:
-        await context.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+        await context.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
     elif query:
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
 
 async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: ContextTypes.DEFAULT_TYPE, poll_id: int, message_id: int = None, chat_id: int = None):
     poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
@@ -1153,9 +1193,9 @@ async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: Co
     
     # Logic to either edit an existing message or the query's message
     if message_id and chat_id:
-        await context.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+        await context.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
     elif query:
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1179,7 +1219,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             app_user_data['wizard_state'] = 'waiting_for_options'
             await context.bot.edit_message_text(
                 "✅ *Шаг 1/2*: Заголовок сохранен.\n\n✨ *Шаг 2/2*: Теперь отправьте варианты ответа. Каждый вариант с новой строки или через запятую.",
-                chat_id=user_id, message_id=wizard_message_id, parse_mode=ParseMode.MARKDOWN,
+                chat_id=user_id, message_id=wizard_message_id, parse_mode=ParseMode.MARKDOWN_V2,
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash_group_{chat_id_for_dashboard}")]])
             )
             await message.delete()
@@ -1199,7 +1239,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.delete_message(chat_id=user_id, message_id=wizard_message_id)
             
             text, kb = build_group_dashboard_content(chat_id_for_dashboard, user_id)
-            await context.bot.send_message(user_id, f"🎉 Черновик «{poll_title}» создан!", reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+            await context.bot.send_message(user_id, f"🎉 Черновик «{poll_title}» создан!", reply_markup=kb, parse_mode=ParseMode.MARKDOWN_V2)
             context.user_data.clear()
 
     # --- SETTINGS HANDLER ---
@@ -1291,12 +1331,12 @@ async def forwarded_message_handler(update: Update, context: ContextTypes.DEFAUL
         return
 
     user_name = user_to_add.first_name or f"@{user_to_add.username}"
-    text = f"В какую группу вы хотите принудительно добавить пользователя {escape_markdown(user_name, version=1)}?"
+    text = f"В какую группу вы хотите принудительно добавить пользователя {escape_markdown(user_name, version=2)}?"
     
     kb = [[InlineKeyboardButton(c.title, callback_data=f"dash_addfwd_{c.id}")] for c in admin_chats]
     kb.append([InlineKeyboardButton("❌ Отмена", callback_data="dash_addfwd_cancel")])
 
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log any error that occurs."""
