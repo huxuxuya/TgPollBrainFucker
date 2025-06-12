@@ -1,7 +1,4 @@
-# -*- coding: utf-8 -*-
-# Gemini was here
 import logging
-import sqlite3
 import os
 import time
 from typing import Union
@@ -12,6 +9,8 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.constants import ParseMode, ChatAction
 from telegram.error import ChatMigrated
 from telegram.helpers import escape_markdown
+
+from src.database import init_database, run_migration, add_user_to_participants as db_add_user, update_known_chats as db_update_chats, get_group_title as db_get_group_title, get_user_name as db_get_user_name, session, Poll, Response, PollSetting, PollOptionSetting, Participant, KnownChat
 
 # Load environment variables from .env file
 load_dotenv()
@@ -27,109 +26,80 @@ logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # Database setup
-conn = sqlite3.connect('poll_data.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS participants
-             (chat_id INTEGER, user_id INTEGER, username TEXT, first_name TEXT, last_name TEXT, excluded INTEGER DEFAULT 0, PRIMARY KEY(chat_id, user_id))''')
-c.execute('''CREATE TABLE IF NOT EXISTS polls
-             (poll_id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, message TEXT, status TEXT, options TEXT, message_id INTEGER, nudge_message_id INTEGER)''')
-c.execute('''CREATE TABLE IF NOT EXISTS responses
-             (poll_id INTEGER, user_id INTEGER, response TEXT)''')
-c.execute('''CREATE TABLE IF NOT EXISTS known_chats
-             (chat_id INTEGER PRIMARY KEY, title TEXT)''')
-c.execute('''CREATE TABLE IF NOT EXISTS poll_settings (
-    poll_id INTEGER PRIMARY KEY,
-    default_show_names INTEGER DEFAULT 1,
-    default_names_style TEXT DEFAULT 'list',
-    default_show_count INTEGER DEFAULT 1,
-    target_sum REAL DEFAULT 0,
-    nudge_positive_emoji TEXT,
-    nudge_negative_emoji TEXT
-)''')
-c.execute('''CREATE TABLE IF NOT EXISTS poll_option_settings (
-    poll_id INTEGER,
-    option_index INTEGER,
-    show_names INTEGER DEFAULT NULL,
-    names_style TEXT DEFAULT NULL,
-    show_count INTEGER DEFAULT NULL,
-    emoji TEXT DEFAULT NULL,
-    is_priority INTEGER DEFAULT 0,
-    contribution_amount REAL DEFAULT 0,
-    show_contribution INTEGER DEFAULT 1,
-    PRIMARY KEY (poll_id, option_index)
-)''')
+init_database()
 
-def run_migration(query: str):
-    try:
-        c.execute(query)
-        conn.commit()
-    except Exception:
-        pass
+BOT_OWNER_ID = None
 
-run_migration('ALTER TABLE poll_option_settings ADD COLUMN emoji TEXT')
-run_migration('ALTER TABLE poll_option_settings ADD COLUMN is_priority INTEGER DEFAULT 0')
-run_migration('ALTER TABLE polls ADD COLUMN message_id INTEGER')
-run_migration('ALTER TABLE poll_settings ADD COLUMN target_sum REAL DEFAULT 0')
-run_migration('ALTER TABLE poll_option_settings ADD COLUMN contribution_amount REAL DEFAULT 0')
-run_migration('ALTER TABLE poll_settings ADD COLUMN default_show_count INTEGER DEFAULT 1')
-run_migration('ALTER TABLE poll_option_settings ADD COLUMN show_count INTEGER DEFAULT NULL')
-run_migration('ALTER TABLE poll_settings ADD COLUMN silent_update INTEGER DEFAULT 0')
-run_migration('ALTER TABLE poll_option_settings ADD COLUMN show_contribution INTEGER DEFAULT 1')
-run_migration('ALTER TABLE polls ADD COLUMN nudge_message_id INTEGER')
-run_migration('ALTER TABLE poll_settings ADD COLUMN nudge_positive_emoji TEXT')
-run_migration('ALTER TABLE poll_settings ADD COLUMN nudge_negative_emoji TEXT')
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global BOT_OWNER_ID
+    user_id = update.effective_user.id
+    if BOT_OWNER_ID is None:
+        BOT_OWNER_ID = user_id
+    if user_id != BOT_OWNER_ID:
+        await update.message.reply_text("Только владелец бота может делать резервную копию.")
+        return
+    db_path = 'poll_data.db'
+    if not os.path.exists(db_path):
+        await update.message.reply_text("Файл базы данных не найден.")
+        return
+    await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+    await update.message.reply_document(open(db_path, 'rb'), filename='poll_data.db', caption='Резервная копия базы данных.')
 
-# --- Utility Functions ---
+async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global BOT_OWNER_ID
+    user_id = update.effective_user.id
+    if BOT_OWNER_ID is None:
+        BOT_OWNER_ID = user_id
+    if user_id != BOT_OWNER_ID:
+        await update.message.reply_text("Только владелец бота может загружать резервную копию.")
+        return
+    await update.message.reply_text("Пожалуйста, отправьте файл poll_data.db в ответ на это сообщение.")
+    context.user_data['awaiting_restore'] = True
+
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global BOT_OWNER_ID
+    user_id = update.effective_user.id
+    if not context.user_data.get('awaiting_restore'):
+        return
+    if user_id != BOT_OWNER_ID:
+        await update.message.reply_text("Только владелец бота может загружать резервную копию.")
+        return
+    document = update.message.document
+    if document.file_name != 'poll_data.db':
+        await update.message.reply_text("Имя файла должно быть poll_data.db")
+        return
+    file = await document.get_file()
+    await file.download_to_drive('poll_data.db')
+    context.user_data['awaiting_restore'] = False
+    await update.message.reply_text("База данных успешно восстановлена. Перезапустите бота для применения изменений.")
 
 async def add_user_to_participants(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
     user = update.effective_user
     chat = update.effective_chat
     if user and chat and chat.type in ['group', 'supergroup']:
-        c.execute(
-            'INSERT OR IGNORE INTO participants (chat_id, user_id, username, first_name, last_name) VALUES (?, ?, ?, ?, ?)',
-            (chat.id, user.id, user.username, user.first_name, user.last_name)
-        )
-        conn.commit()
+        db_add_user(chat.id, user.id, user.username, user.first_name, user.last_name)
 
 async def update_known_chats(chat_id: int, title: str) -> None:
-    c.execute('INSERT OR REPLACE INTO known_chats (chat_id, title) VALUES (?, ?)', (chat_id, title))
-    conn.commit()
+    db_update_chats(chat_id, title)
 
 async def get_admin_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> list:
     user_id = update.effective_user.id
     admin_chats = []
-    c.execute('SELECT DISTINCT chat_id, title FROM known_chats')
-    known_chats = c.fetchall()
-    for chat_id, title in known_chats:
+    known_chats = session.query(KnownChat).all()
+    for chat in known_chats:
         try:
-            admins = await context.bot.get_chat_administrators(chat_id)
+            admins = await context.bot.get_chat_administrators(chat.chat_id)
             if user_id in [admin.user.id for admin in admins]:
-                admin_chats.append(type('Chat', (), {'id': chat_id, 'title': title, 'type': 'group'}))
+                admin_chats.append(type('Chat', (), {'id': chat.chat_id, 'title': chat.title, 'type': 'group'}))
         except Exception as e:
-            logger.error(f'Error checking admin status in known chat {chat_id}: {e}')
+            logger.error(f'Error checking admin status in known chat {chat.chat_id}: {e}')
     return admin_chats
 
 def get_group_title(chat_id: int) -> str:
-    c.execute('SELECT title FROM known_chats WHERE chat_id = ?', (chat_id,))
-    row = c.fetchone()
-    return row[0] if row else f"ID: {chat_id}"
+    return db_get_group_title(chat_id)
 
 def get_user_name(user_id: int, markdown_link: bool = False) -> str:
-    c.execute('SELECT first_name, last_name, username FROM participants WHERE user_id = ?', (user_id,))
-    user_data = c.fetchone()
-    if not user_data: return f"User ID: {user_id}"
-    
-    first_name, last_name, username = user_data
-    name = first_name or ''
-    if last_name: name += f' {last_name}'
-    name = name.strip()
-    if not name: name = f'@{username}' if username else f"User ID: {user_id}"
-
-    if markdown_link:
-        # For V1 markdown, we escape special chars. `]` can't be escaped inside link text, so we remove it.
-        safe_name = escape_markdown(name, version=1).replace(']', '')
-        return f"[{safe_name}](tg://user?id={user_id})"
-    return name
+    return db_get_user_name(user_id, markdown_link)
 
 def get_progress_bar(progress, total, length=20):
     if total <= 0: return "[]", 0
@@ -141,22 +111,25 @@ def get_progress_bar(progress, total, length=20):
 # --- Poll Display Logic ---
 
 def generate_poll_text(poll_id: int) -> str:
-    c.execute('SELECT message, options FROM polls WHERE poll_id = ?', (poll_id,))
-    poll_data = c.fetchone()
-    if not poll_data: return "Опрос не найден."
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    if not poll: return "Опрос не найден."
     
-    message, options_str = poll_data
+    message, options_str = poll.message, poll.options
     original_options = [opt.strip() for opt in options_str.split(',')]
     
-    c.execute('SELECT user_id, response FROM responses WHERE poll_id = ?', (poll_id,))
-    responses = c.fetchall()
+    responses = session.query(Response).filter_by(poll_id=poll_id).all()
     counts = {opt: 0 for opt in original_options}
-    for _, response in responses:
-        if response in counts: counts[response] += 1
+    for resp in responses:
+        if resp.response in counts: counts[resp.response] += 1
         
-    c.execute('SELECT default_show_names, default_names_style, target_sum, default_show_count FROM poll_settings WHERE poll_id = ?', (poll_id,))
-    default_settings_res = c.fetchone()
-    default_show_names, _, target_sum, default_show_count = (default_settings_res or (1, 'list', 0, 1))
+    poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
+    default_show_names = 1
+    target_sum = 0
+    default_show_count = 1
+    if poll_setting:
+        default_show_names = poll_setting.default_show_names
+        target_sum = poll_setting.target_sum
+        default_show_count = poll_setting.default_show_count
     
     total_votes = len(responses)
     total_collected = 0
@@ -164,17 +137,16 @@ def generate_poll_text(poll_id: int) -> str:
 
     options_with_settings = []
     for i, option_text in enumerate(original_options):
-        c.execute('SELECT show_names, names_style, is_priority, contribution_amount, emoji, show_count, show_contribution FROM poll_option_settings WHERE poll_id = ? AND option_index = ?', (poll_id, i))
-        opt_settings = c.fetchone()
+        opt_setting = session.query(PollOptionSetting).filter_by(poll_id=poll_id, option_index=i).first()
         options_with_settings.append({
             'text': option_text,
-            'show_names': opt_settings[0] if opt_settings and opt_settings[0] is not None else default_show_names,
-            'names_style': opt_settings[1] if opt_settings and opt_settings[1] else 'list',
-            'is_priority': opt_settings[2] if opt_settings and opt_settings[2] else 0,
-            'contribution_amount': opt_settings[3] if opt_settings and opt_settings[3] else 0,
-            'emoji': (opt_settings[4] + ' ') if opt_settings and opt_settings[4] else "",
-            'show_count': opt_settings[5] if opt_settings and opt_settings[5] is not None else default_show_count,
-            'show_contribution': opt_settings[6] if opt_settings and opt_settings[6] is not None else 1,
+            'show_names': opt_setting.show_names if opt_setting and opt_setting.show_names is not None else default_show_names,
+            'names_style': opt_setting.names_style if opt_setting and opt_setting.names_style else 'list',
+            'is_priority': opt_setting.is_priority if opt_setting else 0,
+            'contribution_amount': opt_setting.contribution_amount if opt_setting else 0,
+            'emoji': (opt_setting.emoji + ' ') if opt_setting and opt_setting.emoji else "",
+            'show_count': opt_setting.show_count if opt_setting and opt_setting.show_count is not None else default_show_count,
+            'show_contribution': opt_setting.show_contribution if opt_setting and opt_setting.show_contribution is not None else 1,
         })
 
     options_with_settings.sort(key=lambda x: x['is_priority'], reverse=True)
@@ -196,7 +168,7 @@ def generate_poll_text(poll_id: int) -> str:
         text_parts.append(line)
 
         if option_data['show_names'] and count > 0:
-            responders = [r[0] for r in responses if r[1] == option_text]
+            responders = [r.user_id for r in responses if r.response == option_text]
             user_names = [get_user_name(uid, markdown_link=True) for uid in responders]
             names_list = [f"{option_data['emoji']}{name}" for name in user_names]
             indent = "    "
@@ -216,22 +188,20 @@ def generate_poll_text(poll_id: int) -> str:
     return "\n".join(text_parts)
 
 async def generate_nudge_text(poll_id: int, context: ContextTypes.DEFAULT_TYPE) -> str:
-    c.execute('SELECT chat_id FROM polls WHERE poll_id = ?', (poll_id,))
-    res = c.fetchone()
-    if not res: return "Опрос не найден."
-    chat_id = res[0]
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    if not poll: return "Опрос не найден."
+    chat_id = poll.chat_id
 
-    c.execute('SELECT DISTINCT user_id FROM participants WHERE chat_id = ? AND excluded = 0', (chat_id,))
-    participants = {p[0] for p in c.fetchall()}
+    participants = session.query(Participant).filter_by(chat_id=chat_id, excluded=0).all()
+    participant_ids = {p.user_id for p in participants}
 
-    c.execute('SELECT DISTINCT user_id FROM responses WHERE poll_id = ?', (poll_id,))
-    respondents = {r[0] for r in c.fetchall()}
+    respondents = session.query(Response).filter_by(poll_id=poll_id).all()
+    respondent_ids = {r.user_id for r in respondents}
     
-    non_voters = participants - respondents
+    non_voters = participant_ids - respondent_ids
 
-    c.execute('SELECT nudge_negative_emoji FROM poll_settings WHERE poll_id = ?', (poll_id,))
-    res = c.fetchone()
-    neg_emoji = (res[0] if res and res[0] else '❌')
+    poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
+    neg_emoji = poll_setting.nudge_negative_emoji if poll_setting and poll_setting.nudge_negative_emoji else '❌'
 
     text_parts = ["📢 *Ждем вашего голоса:*"]
     
@@ -248,11 +218,10 @@ async def generate_nudge_text(poll_id: int, context: ContextTypes.DEFAULT_TYPE) 
 
 async def update_nudge_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"Attempting to update nudge message for poll {poll_id}")
-    c.execute('SELECT chat_id, nudge_message_id FROM polls WHERE poll_id = ?', (poll_id,))
-    res = c.fetchone()
-    if not res: return
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    if not poll: return
     
-    chat_id, nudge_message_id = res
+    chat_id, nudge_message_id = poll.chat_id, poll.nudge_message_id
     if not nudge_message_id:
         logger.info(f"No nudge message to update for poll {poll_id}.")
         return
@@ -271,16 +240,15 @@ async def update_nudge_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE)
             logger.error(f"Failed to update nudge message {nudge_message_id} for poll {poll_id}: {e}")
             if "message to edit not found" in str(e).lower():
                 # Message was deleted, so we clear the ID
-                c.execute('UPDATE polls SET nudge_message_id = NULL WHERE poll_id = ?', (poll_id,))
-                conn.commit()
+                poll.nudge_message_id = None
+                session.commit()
 
 async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"[POLL_UPDATE] Updating message for poll_id={poll_id}")
-    c.execute('SELECT chat_id, message_id, options FROM polls WHERE poll_id = ?', (poll_id,))
-    poll_data = c.fetchone()
-    if not poll_data or not poll_data[1]: return
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    if not poll or not poll.message_id: return
         
-    chat_id, message_id, options_str = poll_data
+    chat_id, message_id, options_str = poll.chat_id, poll.message_id, poll.options
     new_text = generate_poll_text(poll_id)
     options = [opt.strip() for opt in options_str.split(',')]
     keyboard = [[InlineKeyboardButton(opt, callback_data=f'poll_{poll_id}_{i}')] for i, opt in enumerate(options)]
@@ -289,8 +257,8 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.edit_message_text(text=new_text, chat_id=chat_id, message_id=message_id, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN)
     except ChatMigrated as e:
         logger.warning(f"Chat migrated for poll {poll_id}. Old: {chat_id}, New: {e.new_chat_id}")
-        c.execute('UPDATE polls SET chat_id = ? WHERE poll_id = ?', (e.new_chat_id, poll_id))
-        conn.commit()
+        poll.chat_id = e.new_chat_id
+        session.commit()
     except Exception as e:
         if "Message is not modified" not in str(e): logger.error(f"Failed to edit message for poll {poll_id}: {e}")
 
@@ -320,8 +288,7 @@ async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # --- Dashboard UI ---
 
-def build_group_dashboard_content(chat_id: int) -> (str, InlineKeyboardMarkup):
-    """Строит клавиатуру и текст для дашборда группы."""
+def build_group_dashboard_content(chat_id: int, user_id: int) -> (str, InlineKeyboardMarkup):
     chat_title = get_group_title(chat_id)
     text = f"Панель управления для чата *{escape_markdown(chat_title, 1)}*:"
     
@@ -330,7 +297,6 @@ def build_group_dashboard_content(chat_id: int) -> (str, InlineKeyboardMarkup):
          InlineKeyboardButton("📈 Завершенные опросы", callback_data=f'dash_polls_{chat_id}_closed')],
         [InlineKeyboardButton("👥 Участники", callback_data=f'dash_participants_menu_{chat_id}')],
         [InlineKeyboardButton("✏️ Создать опрос", callback_data=f'dash_wizard_start_{chat_id}')],
-        [InlineKeyboardButton("✍️ Редактировать голоса", callback_data=f'dash_edit_votes_polls_{chat_id}')],
         [InlineKeyboardButton("🔙 Назад к выбору чата", callback_data='dash_back_to_chats')]
     ]
     return text, InlineKeyboardMarkup(keyboard)
@@ -338,19 +304,26 @@ def build_group_dashboard_content(chat_id: int) -> (str, InlineKeyboardMarkup):
 async def private_chat_entry_point(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     admin_chats = await get_admin_chats(update, context)
+    global BOT_OWNER_ID
+    if BOT_OWNER_ID is None:
+        BOT_OWNER_ID = user_id
+        logger.info(f"Set BOT_OWNER_ID to {user_id} as the first user to access dashboard")
+    
     text, kb = "Добро пожаловать! Выберите группу:", [[InlineKeyboardButton(c.title, callback_data=f"dash_group_{c.id}")] for c in admin_chats]
     if not admin_chats: text, kb = 'Я не знаю групп, где вы админ.', []
+    
+    if BOT_OWNER_ID is not None and user_id == BOT_OWNER_ID:
+        kb.append([InlineKeyboardButton("⚙️ Настройки бота", callback_data="admin_settings")])
     
     if update.callback_query: await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
     else: await context.bot.send_message(chat_id=user_id, text=text, reply_markup=InlineKeyboardMarkup(kb))
 
 async def show_group_dashboard(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    text, keyboard = build_group_dashboard_content(chat_id)
+    text, keyboard = build_group_dashboard_content(chat_id, query.from_user.id)
     await query.message.edit_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
 
 async def show_poll_list(query: CallbackQuery, chat_id: int, status: str):
-    c.execute('SELECT poll_id, message FROM polls WHERE chat_id = ? AND status = ? ORDER BY poll_id DESC', (chat_id, status))
-    polls = c.fetchall()
+    polls = session.query(Poll).filter_by(chat_id=chat_id, status=status).order_by(Poll.poll_id.desc()).all()
     status_text_map = {'active': 'активных опросов', 'draft': 'черновиков', 'closed': 'завершённых опросов'}
     status_text = status_text_map.get(status, f'{status} опросов')
 
@@ -363,20 +336,20 @@ async def show_poll_list(query: CallbackQuery, chat_id: int, status: str):
     status_title_map = {'active': 'Активные опросы', 'draft': 'Черновики', 'closed': 'Завершённые опросы'}
     text = f'*{status_title_map.get(status, status.capitalize())}*:'
     kb = []
-    for poll_id, message in polls:
-        msg = (message or f'Опрос {poll_id}')[:40]
+    for poll in polls:
+        msg = (poll.message or f'Опрос {poll.poll_id}')[:40]
         if status == 'active':
-            kb.append([InlineKeyboardButton(msg, callback_data=f"results_{poll_id}")])
+            kb.append([InlineKeyboardButton(msg, callback_data=f"results_{poll.poll_id}")])
         elif status == 'draft':
             kb.append([
-                InlineKeyboardButton(msg, callback_data=f"setresultoptionspoll_{poll_id}"),
-                InlineKeyboardButton("▶️", callback_data=f"dash_startpoll_{poll_id}"),
-                InlineKeyboardButton("🗑", callback_data=f"dash_deletepoll_{poll_id}")
+                InlineKeyboardButton(msg, callback_data=f"setresultoptionspoll_{poll.poll_id}"),
+                InlineKeyboardButton("▶️", callback_data=f"dash_startpoll_{poll.poll_id}"),
+                InlineKeyboardButton("🗑", callback_data=f"dash_deletepoll_{poll.poll_id}")
             ])
         elif status == 'closed':
             kb.append([
-                InlineKeyboardButton(msg, callback_data=f"results_{poll_id}"),
-                InlineKeyboardButton("🗑", callback_data=f"dash_deletepoll_{poll_id}")
+                InlineKeyboardButton(msg, callback_data=f"results_{poll.poll_id}"),
+                InlineKeyboardButton("🗑", callback_data=f"dash_deletepoll_{poll.poll_id}")
             ])
     kb.append([InlineKeyboardButton("↩️ Назад", callback_data=f"dash_group_{chat_id}")])
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
@@ -392,8 +365,7 @@ async def show_participants_menu(query: CallbackQuery, chat_id: int):
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
 async def show_participants_list(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int, page: int = 0):
-    c.execute('SELECT user_id, MAX(first_name) as first, MAX(last_name) as last, MAX(username) as user, MAX(excluded) as ex FROM participants WHERE chat_id = ? GROUP BY user_id ORDER BY first, last', (chat_id,))
-    participants = c.fetchall()
+    participants = session.query(Participant).filter_by(chat_id=chat_id).order_by(Participant.first_name, Participant.last_name).all()
     
     title = get_group_title(chat_id)
 
@@ -411,14 +383,14 @@ async def show_participants_list(query: CallbackQuery, context: ContextTypes.DEF
 
     text_parts = [f'👥 *Список участников («{title}»)* (Стр. {page + 1}/{total_pages}):\n']
     
-    for i, (_, first_name, last_name, username, excluded) in enumerate(paginated_participants, start=start_index + 1):
-        name = first_name or ''
-        if last_name: name += f' {last_name}'
+    for i, participant in enumerate(paginated_participants, start=start_index + 1):
+        name = participant.first_name or ''
+        if participant.last_name: name += f' {participant.last_name}'
         name = name.strip()
-        if not name: name = f'@{username}' if username else "Без имени"
+        if not name: name = f'@{participant.username}' if participant.username else "Без имени"
         
         name = escape_markdown(name, version=1)
-        status = " (🚫)" if excluded else ""
+        status = " (🚫)" if participant.excluded else ""
         text_parts.append(f"{i}. {name}{status}")
     
     text = "\n".join(text_parts)
@@ -573,13 +545,12 @@ async def setresultoptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: int):
     query = update.callback_query
-    c.execute('SELECT status, chat_id, nudge_message_id FROM polls WHERE poll_id = ?', (poll_id,))
-    poll_data = c.fetchone()
-    if not poll_data:
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    if not poll:
         await query.edit_message_text("Опрос не найден.")
         return
 
-    status, group_chat_id, nudge_message_id = poll_data
+    status, group_chat_id, nudge_message_id = poll.status, poll.chat_id, poll.nudge_message_id
     result_text = generate_poll_text(poll_id)
     
     kb_rows = []
@@ -822,7 +793,10 @@ async def add_user_vote(query: CallbackQuery, poll_id: int, option_index: int, u
 
 async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception as e:
+        logger.error(f"Failed to answer callback query: {e}")
     data = query.data.split('_')
     command, params = data[1], data[2:]
     
@@ -845,6 +819,13 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
             await query.answer("Ошибка: неверные данные.", show_alert=True)
             return
         await show_poll_list(query, int(params[0]), params[1])
+    elif command == "show":
+        if len(params) < 1:
+            logger.error(f"Invalid callback data for 'show' command: {query.data}")
+            await query.answer("Ошибка: неверные данные.", show_alert=True)
+            return
+        chat_id = int(params[0])
+        await show_group_dashboard(query, context, chat_id)
     elif command == "addfwd":
         if params[0] == "cancel":
             context.user_data.clear()
@@ -911,14 +892,15 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
             await show_poll_list(query, chat_id, status)
     elif command == "participants":
         # Allow both orders: <chat_id>_<action> or <action>_<chat_id>
-        if params[0].isdigit():
+        if params and params[0].lstrip('-').isdigit():
             chat_id = int(params[0])
             action = params[1] if len(params) > 1 else "menu"
-        else:
+        elif params and len(params) > 1 and params[1].lstrip('-').isdigit():
             action = params[0]
-            chat_id = int(params[1]) if len(params) > 1 else None
-        if chat_id is None:
+            chat_id = int(params[1])
+        else:
             logger.error(f"Invalid participants callback data: {query.data}")
+            await query.answer("Ошибка: неверные данные.", show_alert=True)
             return
 
         if action == "menu":
@@ -963,7 +945,8 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
             logger.error(f"Invalid callback data for edit_votes_polls: {query.data}")
             return
         chat_id = int(params[0])
-        await show_poll_list_for_editing(query, chat_id)
+        await query.answer("Функция редактирования голосов перемещена в настройки опроса.", show_alert=True)
+        await show_group_dashboard(query, context, chat_id)
     else:
         logger.warning(f"Unknown dashboard action: {command}")
         await query.answer("Неизвестное действие.")
@@ -1162,6 +1145,7 @@ async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: Co
         [InlineKeyboardButton("📝 Изменить текст опроса", callback_data=f"setpollsettings_{poll_id}_edittext")],
         [InlineKeyboardButton(f"💰 Целевая сумма сбора: {int(target_sum)}", callback_data=f"setpollsettings_{poll_id}_settargetsum")],
         [InlineKeyboardButton("⚙️ Эмодзи оповещений", callback_data=f"setpollsettings_{poll_id}_nudgeemojis")],
+        [InlineKeyboardButton("✍️ Редактировать голоса", callback_data=f"admin_edit_poll_{poll_id}")],
         [InlineKeyboardButton("↩️ Назад к настройкам", callback_data=f"setresultoptionspoll_{poll_id}")]
     ]
     
@@ -1211,7 +1195,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await message.delete()
             await context.bot.delete_message(chat_id=user_id, message_id=wizard_message_id)
             
-            text, kb = build_group_dashboard_content(chat_id_for_dashboard)
+            text, kb = build_group_dashboard_content(chat_id_for_dashboard, user_id)
             await context.bot.send_message(user_id, f"🎉 Черновик «{poll_title}» создан!", reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
             context.user_data.clear()
 
@@ -1288,11 +1272,28 @@ async def forwarded_message_handler(update: Update, context: ContextTypes.DEFAUL
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Log any error that occurs."""
-    logger.error("Exception while handling an update:", exc_info=context.error)
+    try:
+        raise context.error
+    except Exception as e:
+        logger.error(f"Exception while handling an update: {e}", exc_info=True)
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle admin-related callback queries for editing votes."""
     query = update.callback_query
+    if query.data == "admin_backup":
+        await backup_command(update, context)
+        return
+    elif query.data == "admin_restore":
+        await restore_command(update, context)
+        return
+    elif query.data == "admin_settings":
+        await query.answer()
+        kb = [
+            [InlineKeyboardButton("💾 Бэкап БД", callback_data="admin_backup")],
+            [InlineKeyboardButton("♻️ Восстановить БД", callback_data="admin_restore")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="dash_back_to_chats")]
+        ]
+        await query.message.edit_text("⚙️ Настройки бота", reply_markup=InlineKeyboardMarkup(kb))
+        return
     await query.answer()
     parts = query.data.split('_')
 
@@ -1374,6 +1375,9 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.FORWARDED, forwarded_message_handler))
 
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), text_handler))
+    
+    # Add global error handler
+    application.add_error_handler(error_handler)
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
