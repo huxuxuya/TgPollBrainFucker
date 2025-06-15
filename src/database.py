@@ -35,6 +35,7 @@ class KnownChat(Base):
     __tablename__ = 'known_chats'
     chat_id = Column(BigInteger, primary_key=True)
     title = Column(String)
+    type = Column(String)
 
 class Participant(Base):
     __tablename__ = 'participants'
@@ -101,7 +102,7 @@ def run_migration():
     pass
 
 
-def update_user(session: SessionLocal, user_id: int, first_name: str, last_name: str, username: str = None):
+def update_user(session: Session, user_id: int, first_name: str, last_name: str, username: str = None):
     """Creates or updates a user in the database using a provided session."""
     user = session.query(User).filter_by(user_id=user_id).first()
     if user:
@@ -157,7 +158,7 @@ def add_user_to_participants(chat_id: int, user_id: int, username: str, first_na
         
         participant = session.query(Participant).filter_by(chat_id=chat_id, user_id=user_id).first()
         if not participant:
-            participant = Participant(chat_id=chat_id, user_id=user_id)
+            participant = Participant(chat_id=chat_id, user_id=user_id, username=username, first_name=first_name, last_name=last_name)
             session.add(participant)
         
         session.commit()
@@ -179,15 +180,16 @@ def update_user_standalone(user_id: int, first_name: str, last_name: str, userna
     finally:
         session.close()
 
-def update_known_chats(chat_id: int, title: str) -> None:
+def update_known_chats(chat_id: int, title: str, chat_type: str) -> None:
     """Обновление списка известных чатов"""
     session = SessionLocal()
     try:
         chat = session.query(KnownChat).filter_by(chat_id=chat_id).first()
         if chat:
             chat.title = title
+            chat.type = chat_type
         else:
-            chat = KnownChat(chat_id=chat_id, title=title)
+            chat = KnownChat(chat_id=chat_id, title=title, type=chat_type)
             session.add(chat)
         session.commit()
     except Exception as e:
@@ -210,11 +212,28 @@ def get_group_title(chat_id: int) -> str:
         session.close()
 
 
-def get_user_name(user_id: int, markdown_link: bool = False) -> str:
-    """Gets a user's name, optionally formatted for Markdown."""
-    session = SessionLocal()
+def get_user_name(session: Session, user_id: int, markdown_link: bool = False) -> str:
+    """Gets a user's name from a given session, optionally formatted for Markdown."""
+    logger.info(f"[DEBUG_GET_USER_NAME] Attempting to find user_id '{user_id}' in table '{User.__tablename__}'.")
+    all_user_ids_in_db = [u.user_id for u in session.query(User.user_id).all()]
+    logger.info(f"[DEBUG_GET_USER_NAME] Current user_ids in '{User.__tablename__}' table: {all_user_ids_in_db}")
+    
     user = session.query(User).filter_by(user_id=user_id).first()
-    session.close()
+
+    # If user not found in 'users', try to find them in 'participants' and create the 'users' entry.
+    if not user:
+        logger.warning(f"User {user_id} not found in 'users' table. Checking 'participants' as a fallback.")
+        participant = session.query(Participant).filter_by(user_id=user_id).first()
+        if participant:
+            logger.info(f"User {user_id} found in 'participants'. Creating entry in 'users' to self-heal.")
+            user = User(
+                user_id=participant.user_id,
+                username=participant.username,
+                first_name=participant.first_name,
+                last_name=participant.last_name
+            )
+            session.add(user)
+            # The calling function is responsible for the commit.
 
     # If user is not in our database, we can't create a pretty name, but we can still create a link.
     if not user:
@@ -252,7 +271,6 @@ def get_poll(poll_id: int):
     return poll
 
 def get_responses(poll_id: int) -> List[Response]:
-    """Gets all responses for a given poll."""
     session = SessionLocal()
     responses = session.query(Response).filter_by(poll_id=poll_id).all()
     session.close()
@@ -260,27 +278,28 @@ def get_responses(poll_id: int) -> List[Response]:
 
 def get_poll_setting(poll_id: int, create: bool = False) -> Union[PollSetting, None]:
     session = SessionLocal()
-    setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
-    if not setting and create:
-        logger.info(f"No settings found for poll {poll_id}, creating new entry.")
-        setting = PollSetting(poll_id=poll_id)
-        session.add(setting)
-        session.commit()
-        session.refresh(setting)
-    session.close()
-    return setting
+    try:
+        setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
+        if not setting and create:
+            setting = PollSetting(poll_id=poll_id)
+            session.add(setting)
+            session.commit()
+        return setting
+    finally:
+        session.close()
 
 def get_poll_option_setting(poll_id: int, option_index: int, create: bool = False) -> Union[PollOptionSetting, None]:
     session = SessionLocal()
-    setting = session.query(PollOptionSetting).filter_by(poll_id=poll_id, option_index=option_index).first()
-    if not setting and create:
-        logger.info(f"No settings found for poll {poll_id} option {option_index}, creating new entry.")
-        setting = PollOptionSetting(poll_id=poll_id, option_index=option_index)
-        session.add(setting)
-        session.commit()
-        session.refresh(setting)
-    session.close()
-    return setting
+    try:
+        setting = session.query(PollOptionSetting).filter_by(poll_id=poll_id, option_index=option_index).first()
+        if not setting and create:
+            setting = PollOptionSetting(poll_id=poll_id, option_index=option_index)
+            session.add(setting)
+            session.commit()
+        return setting
+    finally:
+        session.close()
+
 
 def get_known_chats():
     session = SessionLocal()
@@ -290,13 +309,13 @@ def get_known_chats():
 
 def get_polls_by_status(chat_id: int, status: str):
     session = SessionLocal()
-    polls = session.query(Poll).filter_by(chat_id=chat_id, status=status).order_by(Poll.poll_id.desc()).all()
+    polls = session.query(Poll).filter_by(chat_id=chat_id, status=status).all()
     session.close()
     return polls
 
 def get_participants(chat_id: int):
     session = SessionLocal()
-    participants = session.query(Participant).filter_by(chat_id=chat_id).order_by(Participant.first_name, Participant.last_name).all()
+    participants = session.query(Participant).filter_by(chat_id=chat_id).all()
     session.close()
     return participants
 
@@ -329,7 +348,7 @@ def add_participant(participant: Participant):
     session.add(participant)
     session.commit()
     session.close()
-    
+
 def add_poll_setting(setting: PollSetting):
     session = SessionLocal()
     session.add(setting)
@@ -341,7 +360,7 @@ def add_poll_option_setting(setting: PollOptionSetting):
     session.add(setting)
     session.commit()
     session.close()
-    
+
 def delete_response(response: Response):
     session = SessionLocal()
     session.delete(response)
@@ -356,30 +375,44 @@ def delete_poll(poll: Poll):
 
 def delete_participants(chat_id: int):
     session = SessionLocal()
-    session.query(Participant).filter_by(chat_id=chat_id).delete()
-    session.commit()
-    session.close()
+    try:
+        session.query(Participant).filter_by(chat_id=chat_id).delete()
+        session.commit()
+    except Exception as e:
+        logger.error(f"Error deleting participants for chat {chat_id}: {e}")
+        session.rollback()
+    finally:
+        session.close()
 
 def delete_responses_for_poll(poll_id: int):
     session = SessionLocal()
-    session.query(Response).filter_by(poll_id=poll_id).delete()
-    session.commit()
-    session.close()
+    try:
+        session.query(Response).filter_by(poll_id=poll_id).delete()
+        session.commit()
+    except Exception as e:
+        logger.error(f"Error deleting responses for poll {poll_id}: {e}")
+        session.rollback()
+    finally:
+        session.close()
 
 def delete_poll_setting(poll_id: int):
     session = SessionLocal()
-    session.query(PollSetting).filter_by(poll_id=poll_id).delete()
-    session.commit()
-    session.close()
+    try:
+        session.query(PollSetting).filter_by(poll_id=poll_id).delete()
+        session.commit()
+    except Exception as e:
+        logger.error(f"Error deleting poll setting for poll {poll_id}: {e}")
+        session.rollback()
+    finally:
+        session.close()
 
 def delete_poll_option_settings(poll_id: int):
     session = SessionLocal()
-    session.query(PollOptionSetting).filter_by(poll_id=poll_id).delete()
-    session.commit()
-    session.close()
-    
-def commit_session():
-    # This function is now intentionally left blank because each function
-    # manages its own session lifecycle (creation, commit, close).
-    # This prevents stateful session issues.
-    pass 
+    try:
+        session.query(PollOptionSetting).filter_by(poll_id=poll_id).delete()
+        session.commit()
+    except Exception as e:
+        logger.error(f"Error deleting poll option settings for poll {poll_id}: {e}")
+        session.rollback()
+    finally:
+        session.close() 

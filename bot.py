@@ -10,11 +10,8 @@ def main() -> None:
     # Initialize the database
     db.init_database()
 
-    # Define custom timeout settings
-    request = HTTPXRequest(connect_timeout=10.0, read_timeout=20.0)
-
     # Create the Application and pass it your bot's token.
-    application = Application.builder().token(BOT_TOKEN).request(request).build()
+    application = Application.builder().token(BOT_TOKEN).build()
 
     # --- Register Handlers ---
     
@@ -22,6 +19,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", base.start))
     application.add_handler(CommandHandler("help", base.help_command))
     application.add_handler(CommandHandler("debug", base.toggle_debug))
+    application.add_handler(TypeHandler(object, base.track_chats), group=-2) # Track all chats
     application.add_handler(TypeHandler(object, base.log_all_updates), group=-1) # Log all updates
     
     # Admin commands

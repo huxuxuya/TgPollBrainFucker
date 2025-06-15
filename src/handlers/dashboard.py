@@ -3,6 +3,7 @@ from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
 import telegram
+import asyncio
 
 from src import database as db
 from src.config import logger
@@ -21,56 +22,123 @@ async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE,
 
 async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int):
     """Activates a draft poll and sends it to the group."""
-    poll = db.get_poll(poll_id)
-    if not poll or poll.status != 'draft':
-        await query.answer('Опрос не является черновиком или не найден.', show_alert=True)
-        return
-    if not poll.message or not poll.options:
-        await query.answer('Текст или варианты опроса не заданы.', show_alert=True)
-        return
-
-    initial_text = generate_poll_text(poll.poll_id)
-    options = poll.options.split(',')
-    kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
-    
+    session = db.SessionLocal()
     try:
-        msg = await context.bot.send_message(chat_id=poll.chat_id, text=initial_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
-        poll.status = 'active'
-        poll.message_id = msg.message_id
-        db.commit_session()
-        await query.answer(f'Опрос {poll.poll_id} запущен.', show_alert=True)
-        await show_poll_list(query, poll.chat_id, 'draft')
-    except Exception as e:
-        logger.error(f"Ошибка запуска опроса {poll_id}: {e}")
-        await query.answer(f'Ошибка: {e}', show_alert=True)
+        poll = session.query(db.Poll).filter_by(poll_id=poll_id).first()
+        if not poll or poll.status != 'draft':
+            await query.answer('Опрос не является черновиком или не найден.', show_alert=True)
+            return
+        if not poll.message or not poll.options:
+            await query.answer('Текст или варианты опроса не заданы.', show_alert=True)
+            return
+
+        initial_text = generate_poll_text(poll=poll, session=session)
+        options = poll.options.split(',')
+        kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+        
+        try:
+            msg = await context.bot.send_message(chat_id=poll.chat_id, text=initial_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+            poll.status = 'active'
+            poll.message_id = msg.message_id
+            session.commit()
+            await query.answer(f'Опрос {poll.poll_id} запущен.', show_alert=True)
+            await show_poll_list(query, poll.chat_id, 'draft')
+        except Exception as e:
+            logger.error(f"Ошибка запуска опроса {poll_id}: {e}")
+            await query.answer(f'Ошибка: {e}', show_alert=True)
+    finally:
+        session.close()
 
 async def close_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int):
-    """Closes an active poll."""
-    poll = db.get_poll(poll_id)
-    if not poll or poll.status != 'active':
-        await query.answer("Опрос не активен.", show_alert=True)
-        return
-
-    poll.status = 'closed'
-    db.commit_session()
-
-    final_text = generate_poll_text(poll_id)
+    """Closes an active poll, ensuring the transaction is committed."""
+    session = db.SessionLocal()
     try:
-        if poll.message_id:
-            await context.bot.edit_message_text(chat_id=poll.chat_id, message_id=poll.message_id, text=final_text, reply_markup=None, parse_mode=ParseMode.MARKDOWN_V2)
+        poll = session.query(db.Poll).filter_by(poll_id=poll_id).first()
+        
+        if not poll or poll.status != 'active':
+            await query.answer("Опрос не активен.", show_alert=True)
+            return
+
+        poll.status = 'closed'
+        chat_id_for_refresh = poll.chat_id
+        
+        # We must commit the status change before refreshing anything.
+        session.commit()
         await query.answer("Опрос завершён.", show_alert=True)
-    except telegram.error.BadRequest as e:
-        if "Message is not modified" in str(e):
-            logger.info(f"Poll {poll_id} message was not modified on close, ignoring.")
-            await query.answer("Опрос завершён.", show_alert=True)
-        else:
-            logger.error(f"Could not edit final message for poll {poll_id}: {e}")
-            await query.answer("Опрос завершён, но не удалось обновить сообщение в чате.", show_alert=True)
+        
+        # Now, generate the final text for the message in the group chat.
+        final_text = generate_poll_text(poll=poll, session=session)
+        
+        try:
+            if poll.message_id:
+                await context.bot.edit_message_text(
+                    chat_id=poll.chat_id, 
+                    message_id=poll.message_id, 
+                    text=final_text, 
+                    reply_markup=None, 
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+        except telegram.error.BadRequest as e:
+            # It's okay if the message wasn't modified.
+            if "Message is not modified" not in str(e):
+                logger.error(f"Could not edit final message for poll {poll_id}: {e}")
+        
+        # After successfully closing, refresh the list of active polls.
+        await show_poll_list(query, chat_id_for_refresh, 'active')
+
     except Exception as e:
         logger.error(f"An unexpected error occurred while closing poll {poll_id}: {e}")
+        session.rollback()
         await query.answer("Произошла неожиданная ошибка при завершении опроса.", show_alert=True)
+    finally:
+        session.close()
 
-    await show_group_dashboard(query, context, poll.chat_id)
+async def reopen_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int):
+    """Reopens a closed poll."""
+    session = db.SessionLocal()
+    try:
+        poll = session.query(db.Poll).filter_by(poll_id=poll_id).first()
+        if not poll or poll.status != 'closed':
+            await query.answer("Этот опрос нельзя открыть заново.", show_alert=True)
+            return
+
+        # Change status
+        poll.status = 'active'
+        
+        # Regenerate the poll message with buttons
+        new_text = generate_poll_text(poll=poll, session=session)
+        options = poll.options.split(',')
+        kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+
+        try:
+            if poll.message_id:
+                await context.bot.edit_message_text(
+                    chat_id=poll.chat_id,
+                    message_id=poll.message_id,
+                    text=new_text,
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+        except Exception as e:
+            logger.error(f"Failed to edit message when reopening poll {poll_id}: {e}")
+            await query.answer("Опрос открыт, но не удалось обновить сообщение в чате.", show_alert=True)
+            # Rollback status change if message edit fails
+            session.rollback()
+            return
+        
+        # Commit only after the message has been successfully edited
+        session.commit()
+        await query.answer("Опрос снова открыт.", show_alert=True)
+        
+        # After reopening, show the list of closed polls, where this one will be gone.
+        await show_poll_list(query, poll.chat_id, 'closed')
+
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while reopening poll {poll_id}: {e}")
+        session.rollback()
+        await query.answer("Произошла неожиданная ошибка при открытии опроса.", show_alert=True)
+    finally:
+        session.close()
 
 async def delete_poll(query: CallbackQuery, poll_id: int):
     """Deletes a poll and all associated data."""
@@ -87,24 +155,52 @@ async def delete_poll(query: CallbackQuery, poll_id: int):
         await query.answer("Опрос не найден.", show_alert=True)
 
 
-async def private_chat_entry_point(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    admin_chats = []
-    known_chats = db.get_known_chats()
-    for chat in known_chats:
+async def check_admin_in_chat(user_id: int, chat: db.KnownChat, context: ContextTypes.DEFAULT_TYPE, semaphore: asyncio.Semaphore):
+    """Helper to check admin status for one chat, respecting a semaphore."""
+    async with semaphore:
         try:
+            # Don't check private chats.
+            if chat.type == 'private':
+                return None
+                
             admins = await context.bot.get_chat_administrators(chat.chat_id)
             if user_id in [admin.user.id for admin in admins]:
-                admin_chats.append(type('Chat', (), {'id': chat.chat_id, 'title': chat.title, 'type': 'group'}))
+                # Return a simple object that matches the structure expected by the rest of the function.
+                return {'id': chat.chat_id, 'title': chat.title}
         except Exception as e:
-            logger.error(f'Error checking admin status in known chat {chat.chat_id}: {e}')
+            logger.warning(f"Couldn't check admin status in chat {chat.chat_id} ({chat.title}): {e}")
+        return None
 
+async def private_chat_entry_point(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles the /start command in a private chat by concurrently finding all chats where the user is an admin."""
+    # Immediately send a "loading" message to give user feedback.
+    loading_message = await update.effective_message.reply_text("🔎 Ищу чаты, где вы админ...")
+
+    user_id = update.effective_user.id
+    known_chats = db.get_known_chats()
+
+    # Create a semaphore to limit concurrent requests to a reasonable number (e.g., 10)
+    # to avoid hitting Telegram's rate limits or causing pool timeouts.
+    semaphore = asyncio.Semaphore(10)
+
+    # Create concurrent tasks for all admin checks.
+    tasks = [check_admin_in_chat(user_id, chat, context, semaphore) for chat in known_chats]
+    results = await asyncio.gather(*tasks)
+
+    # Filter out the None results for chats where the user isn't an admin.
+    admin_chats = [chat for chat in results if chat is not None]
+    
+    # Edit the "Searching..." message with the final results.
     if not admin_chats:
-        await update.effective_message.reply_text("Я не нашел групп, где вы являетесь администратором и я тоже.")
+        await loading_message.edit_text("Я не нашел групп, где вы являетесь администратором и я тоже.")
         return
 
-    keyboard = [[InlineKeyboardButton(chat.title, callback_data=f'dash:group:{chat.id}')] for chat in admin_chats]
-    await update.effective_message.reply_text('Выберите чат для управления:', reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [[InlineKeyboardButton(chat["title"], callback_data=f"dash:group:{chat['id']}")] for chat in admin_chats]
+    await loading_message.edit_text(
+        'Выберите чат для управления:', 
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
 
 async def show_group_dashboard(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     chat_title = db.get_group_title(chat_id)
@@ -168,75 +264,85 @@ async def show_participants_menu(query: CallbackQuery, chat_id: int):
 
 async def show_participants_list(query: CallbackQuery, chat_id: int, page: int = 0):
     """Displays a paginated list of group participants."""
-    participants = db.get_participants(chat_id)
-    title = escape_markdown(db.get_group_title(chat_id), 2)
+    session = db.SessionLocal()
+    try:
+        participants = db.get_participants(chat_id)
+        title = escape_markdown(db.get_group_title(chat_id), 2)
 
-    if not participants:
-        text = f"В чате «{title}» нет зарегистрированных участников."
-        kb = [[InlineKeyboardButton("↩️ Назад", callback_data=f"dash:participants_menu:{chat_id}")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
-        return
+        if not participants:
+            text = f"В чате «{title}» нет зарегистрированных участников."
+            kb = [[InlineKeyboardButton("↩️ Назад", callback_data=f"dash:participants_menu:{chat_id}")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
+            return
 
-    items_per_page = 50
-    start_index = page * items_per_page
-    end_index = start_index + items_per_page
-    paginated_participants = participants[start_index:end_index]
-    total_pages = -(-len(participants) // items_per_page)
+        items_per_page = 50
+        start_index = page * items_per_page
+        end_index = start_index + items_per_page
+        paginated_participants = participants[start_index:end_index]
+        total_pages = -(-len(participants) // items_per_page)
 
-    text_parts = [f'👥 *Список участников \\(«{title}»\\)* \\(Стр\\. {page + 1}/{total_pages}\\):\n']
-    
-    for i, p in enumerate(paginated_participants, start=start_index + 1):
-        name = escape_markdown(db.get_user_name(p.user_id), 2)
-        status = " \\(🚫\\)" if p.excluded else ""
-        text_parts.append(f"{i}\\. {name}{status}")
-    
-    text = "\n".join(text_parts)
-    
-    kb_rows = []
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"dash:participants_list:{chat_id}:{page - 1}"))
-    if end_index < len(participants):
-        nav_buttons.append(InlineKeyboardButton("➡️", callback_data=f"dash:participants_list:{chat_id}:{page + 1}"))
-    
-    if nav_buttons: kb_rows.append(nav_buttons)
-    kb_rows.append([InlineKeyboardButton("↩️ В меню", callback_data=f"dash:participants_menu:{chat_id}")])
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.MARKDOWN_V2)
+        text_parts = [f'👥 *Список участников \\(«{title}»\\)* \\(Стр\\. {page + 1}/{total_pages}\\):\n']
+        
+        for i, p in enumerate(paginated_participants, start=start_index + 1):
+            name = escape_markdown(db.get_user_name(session, p.user_id), 2)
+            status = " \\(🚫\\)" if p.excluded else ""
+            text_parts.append(f"{i}\\. {name}{status}")
+        
+        text = "\n".join(text_parts)
+        
+        kb_rows = []
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"dash:participants_list:{chat_id}:{page - 1}"))
+        if end_index < len(participants):
+            nav_buttons.append(InlineKeyboardButton("➡️", callback_data=f"dash:participants_list:{chat_id}:{page + 1}"))
+        
+        if nav_buttons: kb_rows.append(nav_buttons)
+        kb_rows.append([InlineKeyboardButton("↩️ В меню", callback_data=f"dash:participants_menu:{chat_id}")])
+        
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.MARKDOWN_V2)
+        session.commit()
+    finally:
+        session.close()
 
 async def show_exclude_menu(query: CallbackQuery, chat_id: int, page: int = 0):
     """Displays a paginated menu to exclude/include participants."""
-    participants = db.get_participants(chat_id)
-    title = escape_markdown(db.get_group_title(chat_id), 2)
+    session = db.SessionLocal()
+    try:
+        participants = db.get_participants(chat_id)
+        title = escape_markdown(db.get_group_title(chat_id), 2)
 
-    if not participants:
-        await query.answer("Нет участников для управления.", show_alert=True)
-        return
+        if not participants:
+            await query.answer("Нет участников для управления.", show_alert=True)
+            return
 
-    items_per_page = 20
-    start_index = page * items_per_page
-    end_index = start_index + items_per_page
-    paginated_participants = participants[start_index:end_index]
-    total_pages = -(-len(participants) // items_per_page)
+        items_per_page = 20
+        start_index = page * items_per_page
+        end_index = start_index + items_per_page
+        paginated_participants = participants[start_index:end_index]
+        total_pages = -(-len(participants) // items_per_page)
 
-    text = f'👥 *Исключение/возврат \\(«{title}»\\)* \\(Стр\\. {page + 1}/{total_pages}\\):\nНажмите на участника, чтобы изменить его статус.'
-    
-    kb = []
-    for p in paginated_participants:
-        name = db.get_user_name(p.user_id)
-        status_icon = "🚫" if p.excluded else "✅"
-        button_text = f"{status_icon} {name}"
-        callback_data = f"dash:toggle_exclude:{chat_id}:{p.user_id}:{page}"
-        kb.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
-    
-    nav_buttons = []
-    if page > 0: nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"dash:exclude_menu:{chat_id}:{page-1}"))
-    if end_index < len(participants): nav_buttons.append(InlineKeyboardButton("➡️", callback_data=f"dash:exclude_menu:{chat_id}:{page+1}"))
-    if nav_buttons: kb.append(nav_buttons)
+        text = f'👥 *Исключение/возврат \\(«{title}»\\)* \\(Стр\\. {page + 1}/{total_pages}\\):\nНажмите на участника, чтобы изменить его статус.'
+        
+        kb = []
+        for p in paginated_participants:
+            name = db.get_user_name(session, p.user_id)
+            status_icon = "🚫" if p.excluded else "✅"
+            button_text = f"{status_icon} {name}"
+            callback_data = f"dash:toggle_exclude:{chat_id}:{p.user_id}:{page}"
+            kb.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+        
+        nav_buttons = []
+        if page > 0: nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"dash:exclude_menu:{chat_id}:{page-1}"))
+        if end_index < len(participants): nav_buttons.append(InlineKeyboardButton("➡️", callback_data=f"dash:exclude_menu:{chat_id}:{page+1}"))
+        if nav_buttons: kb.append(nav_buttons)
 
-    kb.append([InlineKeyboardButton("↩️ Назад", callback_data=f"dash:participants_menu:{chat_id}")])
-    
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+        kb.append([InlineKeyboardButton("↩️ Назад", callback_data=f"dash:participants_menu:{chat_id}")])
+        
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+        session.commit()
+    finally:
+        session.close()
 
 async def toggle_exclude_participant(query: CallbackQuery, chat_id: int, user_id: int, page: int):
     """Toggles the 'excluded' status for a participant."""
@@ -279,21 +385,21 @@ async def delete_poll_confirm(query: CallbackQuery, poll_id: int):
 async def delete_poll_execute(query: CallbackQuery, poll_id: int):
     """Deletes a poll after confirmation."""
     poll = db.get_poll(poll_id)
-    if poll:
-        chat_id, status = poll.chat_id, poll.status
-        db.delete_responses_for_poll(poll_id)
-        db.delete_poll_setting(poll_id)
-        db.delete_poll_option_settings(poll_id)
-        db.delete_poll(poll)
-        await query.answer(f"Опрос {poll_id} удален.", show_alert=True)
-        await show_poll_list(query, chat_id, status)
-    else:
-        await query.answer("Опрос не найден.", show_alert=True)
+    chat_id, status = poll.chat_id, poll.status
+    db.delete_poll(poll)
+    await query.answer(f"Опрос {poll_id} окончательно удален.", show_alert=True)
+    await show_poll_list(query, chat_id, status)
 
 async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Routes all callbacks starting with 'dash:'."""
     query = update.callback_query
-    await query.answer()
-    
+    # It's better to answer the query right at the start.
+    # Specific handlers can override this with their own answers if needed.
+    # We run this as a background task to avoid blocking on network issues.
+    asyncio.create_task(query.answer())
+
+    # Simplified parsing for clarity
+    # format: "dash:command:param1:param2:..."
     parts = query.data.split(':')
     command = parts[1]
     params = parts[2:]
@@ -311,5 +417,6 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
     elif command == "delete_poll_confirm": await delete_poll_confirm(query, int(params[0]))
     elif command == "delete_poll_execute": await delete_poll_execute(query, int(params[0]))
     elif command == "close_poll": await close_poll(query, context, int(params[0]))
+    elif command == "reopen_poll": await reopen_poll(query, context, int(params[0]))
     elif command == "wizard_start": await wizard_start(query, context, int(params[0]))
     # Other handlers will be added here 

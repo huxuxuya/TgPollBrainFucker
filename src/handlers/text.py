@@ -10,23 +10,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     text_input = message.text
     app_user_data = context.user_data
+    
+    state = app_user_data.get('wizard_state') or app_user_data.get('settings_state')
 
-    if 'wizard_state' in app_user_data:
-        state = app_user_data['wizard_state']
-        
-        if state == 'waiting_for_title':
-            app_user_data['wizard_title'] = text_input
-            app_user_data['wizard_state'] = 'waiting_for_options'
-            await message.reply_text("Отлично. Теперь отправьте варианты ответа, каждый в новой строке. Когда закончите, нажмите /done.")
-        
-        elif state == 'waiting_for_options':
-            if 'wizard_options' not in app_user_data:
-                app_user_data['wizard_options'] = []
-            app_user_data['wizard_options'].append(text_input)
-            await message.reply_text(f"Добавлен вариант: '{text_input}'. Добавьте еще или нажмите /done.")
+    if state == 'waiting_for_title':
+        app_user_data['wizard_title'] = text_input
+        app_user_data['wizard_state'] = 'waiting_for_options'
+        await message.reply_text("Отлично. Теперь отправьте варианты ответа, каждый в новой строке. Когда закончите, нажмите /done.")
+    
+    elif state == 'waiting_for_options':
+        if 'wizard_options' not in app_user_data:
+            app_user_data['wizard_options'] = []
+        app_user_data['wizard_options'].append(text_input)
+        await message.reply_text(f"Добавлен вариант: '{text_input}'. Добавьте еще или нажмите /done.")
 
-    elif 'settings_state' in app_user_data:
-        state = app_user_data.get('settings_state')
+    elif state and 'waiting_for_set_' in state:
         poll_id = app_user_data.get('poll_id')
         
         if state == 'waiting_for_set_option_emoji':

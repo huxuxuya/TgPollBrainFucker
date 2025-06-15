@@ -4,6 +4,7 @@ from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
 from typing import Union
 from telegram.error import BadRequest
+import asyncio
 
 from src import database as db
 from src.config import logger
@@ -202,9 +203,11 @@ async def text_input_for_option_setting(query: CallbackQuery, context: ContextTy
     )
 
 async def settings_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Routes all callbacks starting with 'settings:'."""
     query = update.callback_query
-    await query.answer()
-
+    # Run as a background task to avoid blocking on network issues.
+    asyncio.create_task(query.answer())
+    
     parts = query.data.split(':')
     command = parts[1]
     poll_id = int(parts[2])

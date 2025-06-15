@@ -11,20 +11,12 @@ from src.handlers import dashboard
 from src.decorators import admin_only
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat = update.effective_chat
-
-    if user and chat:
-        # We need to handle both private and group chats
-        if chat.type in ['group', 'supergroup']:
-            db.update_known_chats(chat.id, chat.title)
-            db.add_user_to_participants(chat.id, user.id, user.username, user.first_name, user.last_name)
-            me = await context.bot.get_me()
-            await update.message.reply_text(f"Привет! Для управления опросами, напишите мне в личном чате: @{me.username}")
-            await update.message.reply_text(f"Список участников для группы *{escape_markdown(db.get_group_title(chat.id))}*:\n")
-        else: # private chat
-            await dashboard.private_chat_entry_point(update, context)
-
+    """Sends a welcome message and the chat selection keyboard."""
+    if update.effective_chat.type == 'private':
+        await dashboard.private_chat_entry_point(update, context)
+    else:
+        # If /start is used in a group, just give a brief intro.
+        await update.message.reply_text("Я — бот для опросов. Используйте меня в личном чате для управления.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     help_text = (
@@ -47,8 +39,19 @@ async def toggle_debug(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     else:
         await update.message.reply_text("Подробное логирование всех событий ВЫКЛЮЧЕНО.")
 
+async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tracks every chat the bot is in. Called by the TypeHandler."""
+    if update.effective_chat:
+        # This will add the chat to the DB if it's not there, or update its title if it changed.
+        db.update_known_chats(
+            chat_id=update.effective_chat.id, 
+            title=update.effective_chat.title or "Unknown Title", 
+            chat_type=update.effective_chat.type
+        )
+
 async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if context.bot_data.get('debug_mode_enabled', False):
+    """Logs every update received by the bot for debugging purposes."""
+    if context.bot_data.get('debug_mode', False):
         logger.info(f"[DEBUG_UPDATE]: {update.to_dict()}")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -2,6 +2,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
+import asyncio
 
 from src import database as db
 from src.config import logger
@@ -54,6 +55,9 @@ async def process_vote(
         username=user.username,
         option_index=option_index
     )
+    
+    # We answer the callback query as a background task to avoid blocking.
+    asyncio.create_task(query.answer())
     
     # Try to update the poll message with new results
     try:
