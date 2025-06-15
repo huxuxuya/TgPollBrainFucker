@@ -1,8 +1,8 @@
 import os
 import logging
-from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Boolean, Float, Text, PrimaryKeyConstraint
+from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Boolean, Float, Text, PrimaryKeyConstraint, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker, Session, relationship
 from typing import Union, List
 from telegram.helpers import escape_markdown
 
@@ -20,7 +20,11 @@ if DATABASE_URL.startswith('postgres'):
 logger.info(f"Using database: {DATABASE_URL}")
 
 # Создание движка и сессии
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+engine_args = {}
+if DATABASE_URL.startswith('sqlite'):
+    engine_args['connect_args'] = {"check_same_thread": False}
+
+engine = create_engine(DATABASE_URL, **engine_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Модели таблиц
@@ -54,15 +58,25 @@ class Poll(Base):
     message = Column(Text)
     options = Column(Text)
     status = Column(String, default='draft')
+    poll_type = Column(String, default='native', nullable=False)
     message_id = Column(BigInteger)
     nudge_message_id = Column(BigInteger)
+    
+    # This relationship allows us to easily access responses via poll.responses
+    responses = relationship("Response", backref="poll", cascade="all, delete-orphan")
+
+class WebApp(Base):
+    __tablename__ = 'web_apps'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    chat_id = Column(BigInteger, nullable=False)
+    name = Column(String, nullable=False)
+    url = Column(String, nullable=False)
 
 class Response(Base):
     __tablename__ = 'responses'
-    poll_id = Column(Integer)
-    user_id = Column(BigInteger)
+    poll_id = Column(Integer, ForeignKey('polls.poll_id'), primary_key=True)
+    user_id = Column(BigInteger, primary_key=True)
     response = Column(Text)
-    __table_args__ = (PrimaryKeyConstraint('poll_id', 'user_id'),)
 
 class PollSetting(Base):
     __tablename__ = 'poll_settings'
@@ -113,40 +127,45 @@ def update_user(session: Session, user_id: int, first_name: str, last_name: str,
         user = User(user_id=user_id, first_name=first_name, last_name=last_name, username=username)
         session.add(user)
 
-def add_or_update_response(poll_id: int, user_id: int, first_name: str, last_name: str, username: str, option_index: int):
-    """Adds or updates a response within a single transaction."""
+def add_or_update_response(poll_id: int, user_id: int, first_name: str, last_name: str, username: str, option_index: int = None, option_text: str = None):
+    """Adds or updates a user's response to a poll."""
     session = SessionLocal()
     try:
-        logger.info(f"[DEBUG_DB_UPDATE] Starting transaction for user {user_id} on poll {poll_id}.")
-        update_user(session, user_id, first_name, last_name, username)
-
-        existing_response = session.query(Response).filter_by(poll_id=poll_id, user_id=user_id).first()
-        poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+        # First, ensure the user exists in the main Users table
+        user = session.query(User).filter_by(user_id=user_id).first()
+        if not user:
+            user = User(user_id=user_id, first_name=first_name, last_name=last_name, username=username)
+            session.add(user)
+            # We don't commit here, we let the response addition commit everything
         
+        poll = session.query(Poll).filter_by(poll_id=poll_id).first()
         if not poll:
-            logger.error(f"Cannot add response, poll with id {poll_id} not found.")
+            logger.error(f"Poll with ID {poll_id} not found, can't add response.")
             return
 
-        response_text = poll.options.split(',')[option_index]
-
-        if existing_response:
-            if existing_response.response == response_text:
-                logger.info(f"[DEBUG_DB_UPDATE] Deleting existing identical response for user {user_id}.")
-                session.delete(existing_response)
-            else:
-                logger.info(f"[DEBUG_DB_UPDATE] Changing vote for user {user_id} to '{response_text}'.")
-                existing_response.response = response_text
+        # Determine the response text
+        response_value = None
+        if option_text is not None:
+            response_value = option_text
+        elif option_index is not None:
+            try:
+                options = poll.options.split(',')
+                response_value = options[option_index].strip()
+            except IndexError:
+                logger.error(f"Invalid option index {option_index} for poll {poll_id}")
+                return
         else:
-            new_response = Response(poll_id=poll_id, user_id=user_id, response=response_text)
-            logger.info(f"[DEBUG_DB_UPDATE] Creating new response for user {user_id}: '{response_text}'.")
-            session.add(new_response)
+            logger.error("Either option_index or option_text must be provided.")
+            return
+
+        response = session.query(Response).filter_by(poll_id=poll_id, user_id=user_id).first()
+        if response:
+            response.response = response_value
+        else:
+            response = Response(poll_id=poll_id, user_id=user_id, response=response_value)
+            session.add(response)
         
-        logger.info("[DEBUG_DB_UPDATE] Committing transaction.")
         session.commit()
-        logger.info("[DEBUG_DB_UPDATE] Transaction committed.")
-    except Exception as e:
-        logger.error(f"Error in add_or_update_response: {e}")
-        session.rollback()
     finally:
         session.close()
 
@@ -414,5 +433,60 @@ def delete_poll_option_settings(poll_id: int):
     except Exception as e:
         logger.error(f"Error deleting poll option settings for poll {poll_id}: {e}")
         session.rollback()
+    finally:
+        session.close()
+
+def get_web_apps(chat_id: int) -> List[WebApp]:
+    """Fetches all registered web apps for a given chat."""
+    session = SessionLocal()
+    try:
+        return session.query(WebApp).filter_by(chat_id=chat_id).order_by(WebApp.name).all()
+    finally:
+        session.close()
+
+def add_web_app(chat_id: int, name: str, url: str):
+    """Adds a new web app to the database."""
+    session = SessionLocal()
+    try:
+        new_app = WebApp(chat_id=chat_id, name=name, url=url)
+        session.add(new_app)
+        session.commit()
+    except Exception as e:
+        logger.error(f"Error adding web app: {e}")
+        session.rollback()
+    finally:
+        session.close()
+
+def delete_web_app(app_id: int):
+    """Deletes a web app by its ID."""
+    session = SessionLocal()
+    try:
+        app_to_delete = session.query(WebApp).filter_by(id=app_id).first()
+        if app_to_delete:
+            session.delete(app_to_delete)
+            session.commit()
+            logger.info(f"Deleted Web App with ID {app_id}")
+    finally:
+        session.close()
+
+def has_user_created_poll_in_chat(user_id: int, chat_id: int) -> bool:
+    """
+    Checks if a given user has ever created a poll in a specific chat.
+    This is used as a fallback authorization method for non-visible admins.
+    Note: This check assumes that the creator of a poll is the first person who voted.
+    A more robust solution would be to add a 'creator_id' to the Polls table.
+    """
+    session = SessionLocal()
+    try:
+        # A user has "created" a poll if they have a response for it.
+        # This is an approximation. For a more robust check, a `creator_id`
+        # should be added to the Poll model.
+        count = (
+            session.query(Response)
+            .join(Poll, Poll.poll_id == Response.poll_id)
+            .filter(Poll.chat_id == chat_id, Response.user_id == user_id)
+            .count()
+        )
+        return count > 0
     finally:
         session.close() 

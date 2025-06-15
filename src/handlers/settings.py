@@ -129,11 +129,11 @@ async def show_poll_options_settings_menu(query: CallbackQuery, context: Context
 
     await _edit_message_safely(context, text, query=query, reply_markup=InlineKeyboardMarkup(kb))
 
-async def show_single_option_settings_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int, option_index: int):
+async def show_single_option_settings_menu(query: Union[CallbackQuery, None], context: ContextTypes.DEFAULT_TYPE, poll_id: int, option_index: int, message_id: int = None, chat_id: int = None):
     """Shows the detailed settings menu for a single poll option."""
     poll = db.get_poll(poll_id)
     if not poll:
-        await query.answer("Опрос не найден.", show_alert=True)
+        if query: await query.answer("Опрос не найден.", show_alert=True)
         return
     
     option_text = poll.options.split(',')[option_index].strip()
@@ -164,13 +164,20 @@ async def show_single_option_settings_menu(query: CallbackQuery, context: Contex
         ],
         [InlineKeyboardButton("↩️ К списку вариантов", callback_data=f"settings:poll_options_menu:{poll_id}")]
     ]
-    await _edit_message_safely(context, text, query=query, reply_markup=InlineKeyboardMarkup(kb))
+    await _edit_message_safely(context, text, query=query, chat_id=chat_id, message_id=message_id, reply_markup=InlineKeyboardMarkup(kb))
 
 async def text_input_for_setting(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int, setting_key: str):
     """Prompts user for text input for a given setting."""
+    # Storing state for the text_handler
+    context.user_data['wizard_state'] = 'waiting_for_poll_setting'
+    context.user_data['wizard_poll_id'] = poll_id
+    context.user_data['wizard_setting_key'] = setting_key
+    if query.message:
+        context.user_data['wizard_message_id'] = query.message.message_id
+        
     text_map = {
         "message": "Введите новый заголовок опроса:",
-        "options": "Введите новые варианты, разделенные запятой:",
+        "options": "Введите новые варианты, разделенные запятой (или каждый на новой строке):",
         "nudge_negative_emoji": "Введите новый эмодзи для 'не проголосовал':",
     }
     cancel_cb = f"settings:poll_menu:{poll_id}"
