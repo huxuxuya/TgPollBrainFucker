@@ -123,11 +123,16 @@ async def move_to_bottom_handler(update: Update, context: ContextTypes.DEFAULT_T
             logger.warning(f"Couldn't delete old poll message {poll.message_id}: {e}")
 
         new_text = generate_poll_text(poll=poll, session=session)
-        options = poll.options.split(',')
-        kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+        kb = []
+        if poll.poll_type == 'native':
+            options = poll.options.split(',')
+            kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+        elif poll.poll_type == 'webapp':
+            from telegram.WebAppInfo import WebAppInfo
+            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=poll.options))]]
         
         try:
-            new_message = await context.bot.send_message(poll.chat_id, new_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+            new_message = await context.bot.send_message(chat_id=poll.chat_id, text=new_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
             poll.message_id = new_message.message_id
             session.commit()
         except Exception as e:

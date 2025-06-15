@@ -4,18 +4,62 @@ from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
 import telegram
 import asyncio
+import time
 
 from src import database as db
 from src.config import logger
 from src.display import generate_poll_text
 
 async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """Starts the poll creation wizard."""
+    """Starts the poll creation wizard by asking for the poll type."""
     context.user_data['wizard_chat_id'] = chat_id
+    
+    keyboard = [
+        [InlineKeyboardButton("📊 Обычный опрос", callback_data=f"dash:wizard_set_type:native:{chat_id}")],
+        [InlineKeyboardButton("🌐 Web App опрос", callback_data=f"dash:wizard_set_type:webapp:{chat_id}")],
+        [InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]
+    ]
+    
+    await query.edit_message_text(
+        "Выберите тип опроса, который хотите создать:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def wizard_set_type(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_type: str, chat_id: int):
+    """Handles the poll type selection and proceeds to the next step."""
+    context.user_data['wizard_poll_type'] = poll_type
+    
+    if poll_type == 'native':
+        context.user_data['wizard_state'] = 'waiting_for_title'
+        await query.edit_message_text(
+            "Введите название опроса. Вы сможете его изменить позже.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]])
+        )
+    elif poll_type == 'webapp':
+        web_apps = db.get_web_apps(chat_id)
+        if not web_apps:
+            await query.answer("Сначала добавьте хотя бы одно Web App в меню управления Web Apps.", show_alert=True)
+            await show_group_dashboard(query, context, chat_id)
+            return
+
+        kb_rows = []
+        for app in web_apps:
+            kb_rows.append([InlineKeyboardButton(app.name, callback_data=f"dash:wizard_set_webapp:{app.id}")])
+        
+        kb_rows.append([InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")])
+        
+        await query.edit_message_text(
+            "Выберите Web App для этого опроса:",
+            reply_markup=InlineKeyboardMarkup(kb_rows)
+        )
+
+async def wizard_set_webapp(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, web_app_id: int):
+    """Sets the web app for the poll and asks for the poll title."""
+    context.user_data['wizard_webapp_id'] = web_app_id
     context.user_data['wizard_state'] = 'waiting_for_title'
     await query.edit_message_text(
-        "Введите название опроса. Вы сможете его изменить позже.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]])
+        "Вы выбрали Web App. Теперь введите название для этого опроса (например, *Еженедельная оценка*):",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{context.user_data['wizard_chat_id']}")]])
     )
 
 # +++ Poll Actions Handlers (called from dashboard) +++
@@ -33,8 +77,15 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
             return
 
         initial_text = generate_poll_text(poll=poll, session=session)
-        options = poll.options.split(',')
-        kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+        
+        kb = []
+        if poll.poll_type == 'native':
+            options = poll.options.split(',')
+            kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+        elif poll.poll_type == 'webapp':
+            from telegram.WebAppInfo import WebAppInfo
+            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=poll.options))]]
+
         
         try:
             msg = await context.bot.send_message(chat_id=poll.chat_id, text=initial_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
@@ -107,8 +158,13 @@ async def reopen_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, 
         
         # Regenerate the poll message with buttons
         new_text = generate_poll_text(poll=poll, session=session)
-        options = poll.options.split(',')
-        kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+        kb = []
+        if poll.poll_type == 'native':
+            options = poll.options.split(',')
+            kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+        elif poll.poll_type == 'webapp':
+            from telegram.WebAppInfo import WebAppInfo
+            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=poll.options))]]
 
         try:
             if poll.message_id:
@@ -156,40 +212,86 @@ async def delete_poll(query: CallbackQuery, poll_id: int):
 
 
 async def check_admin_in_chat(user_id: int, chat: db.KnownChat, context: ContextTypes.DEFAULT_TYPE, semaphore: asyncio.Semaphore):
-    """Helper to check admin status for one chat, respecting a semaphore."""
+    """
+    Helper to check admin/creator status for one chat, respecting a semaphore and with an individual timeout.
+    A user is considered "authorized" if they are a real admin OR if they have created a poll in that chat.
+    """
     async with semaphore:
         try:
-            # Don't check private chats.
-            if chat.type == 'private':
+            # Add a 5-second timeout to each individual check to prevent hangs
+            async def check_logic():
+                # Don't check private chats. The 'type' must be explicitly not 'private'.
+                if chat.type == 'private':
+                    return None
+                    
+                # --- Primary Check: Is the user a visible admin? ---
+                logger.info(f"Checking admin status for user {user_id} in chat {chat.chat_id} ('{chat.title}')...")
+                admins = await context.bot.get_chat_administrators(chat.chat_id)
+                admin_ids = [admin.user.id for admin in admins]
+
+                if user_id in admin_ids:
+                    logger.info(f"SUCCESS (Admin): User {user_id} IS admin in chat {chat.chat_id}.")
+                    return {'id': chat.chat_id, 'title': chat.title}
+
+                # --- Fallback Check: Has the user created any polls in this chat? ---
+                if db.has_user_created_poll_in_chat(user_id, chat.chat_id):
+                    logger.info(f"SUCCESS (Creator): User {user_id} is not an admin but created a poll in chat {chat.chat_id}.")
+                    return {'id': chat.chat_id, 'title': chat.title}
+
+                # If neither check passes, log for diagnostics.
+                logger.warning(
+                    f"INFO: User {user_id} is NOT in the admin list for chat {chat.chat_id} "
+                    f"('{chat.title}') and has not created polls there. Received admin IDs: {admin_ids}"
+                )
                 return None
-                
-            admins = await context.bot.get_chat_administrators(chat.chat_id)
-            if user_id in [admin.user.id for admin in admins]:
-                # Return a simple object that matches the structure expected by the rest of the function.
-                return {'id': chat.chat_id, 'title': chat.title}
+
+            # Wrap the logic with a 5-second timeout.
+            return await asyncio.wait_for(check_logic(), timeout=5.0)
+
+        except asyncio.TimeoutError:
+            logger.warning(f"TIMEOUT: Check for chat {chat.chat_id} ('{chat.title}') took too long and was skipped.")
         except Exception as e:
-            logger.warning(f"Couldn't check admin status in chat {chat.chat_id} ({chat.title}): {e}")
+            logger.warning(f"FAILED to check admin status in chat {chat.chat_id} ('{chat.title}'): {e}")
+        
         return None
 
 async def private_chat_entry_point(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the /start command in a private chat by concurrently finding all chats where the user is an admin."""
+    user_id = update.effective_user.id
+    logger.info(f"User {user_id} started dashboard process. Finding admin chats.")
+    
     # Immediately send a "loading" message to give user feedback.
     loading_message = await update.effective_message.reply_text("🔎 Ищу чаты, где вы админ...")
 
-    user_id = update.effective_user.id
     known_chats = db.get_known_chats()
+    if not known_chats:
+        logger.info(f"User {user_id} has no known chats to check.")
+        await loading_message.edit_text("Я не состою ни в каких чатах. Сначала добавьте меня в группу.")
+        return
+
+    logger.info(f"Found {len(known_chats)} known chats to check for user {user_id}.")
 
     # Create a semaphore to limit concurrent requests to a reasonable number (e.g., 10)
     # to avoid hitting Telegram's rate limits or causing pool timeouts.
     semaphore = asyncio.Semaphore(10)
 
     # Create concurrent tasks for all admin checks.
-    tasks = [check_admin_in_chat(user_id, chat, context, semaphore) for chat in known_chats]
-    results = await asyncio.gather(*tasks)
+    start_time = time.time()
 
-    # Filter out the None results for chats where the user isn't an admin.
-    admin_chats = [chat for chat in results if chat is not None]
+    tasks = [check_admin_in_chat(user_id, chat, context, semaphore) for chat in known_chats]
+    results = await asyncio.gather(*tasks, return_exceptions=True) # Use return_exceptions to prevent one failure from stopping all
+
+    duration = time.time() - start_time
+    logger.info(f"Admin checks for user {user_id} completed in {duration:.2f} seconds.")
+
+    # Filter out the None results and exceptions
+    admin_chats = [chat for chat in results if chat is not None and not isinstance(chat, Exception)]
+    failed_checks = [r for r in results if isinstance(r, Exception)]
     
+    if failed_checks:
+        logger.error(f"{len(failed_checks)} checks failed with exceptions during dashboard load for user {user_id}.")
+
+
     # Edit the "Searching..." message with the final results.
     if not admin_chats:
         await loading_message.edit_text("Я не нашел групп, где вы являетесь администратором и я тоже.")
@@ -210,6 +312,7 @@ async def show_group_dashboard(query: CallbackQuery, context: ContextTypes.DEFAU
          InlineKeyboardButton("📈 Завершенные", callback_data=f'dash:polls:{chat_id}:closed')],
         [InlineKeyboardButton("📝 Черновики", callback_data=f'dash:polls:{chat_id}:draft')],
         [InlineKeyboardButton("👥 Участники", callback_data=f'dash:participants_menu:{chat_id}')],
+        [InlineKeyboardButton("🌐 Web Apps", callback_data=f'dash:webapp_menu:{chat_id}')],
         [InlineKeyboardButton("✏️ Создать опрос", callback_data=f'dash:wizard_start:{chat_id}')],
         [InlineKeyboardButton("🔙 К выбору чата", callback_data='dash:back_to_chats')]
     ]
@@ -384,11 +487,69 @@ async def delete_poll_confirm(query: CallbackQuery, poll_id: int):
 
 async def delete_poll_execute(query: CallbackQuery, poll_id: int):
     """Deletes a poll after confirmation."""
-    poll = db.get_poll(poll_id)
-    chat_id, status = poll.chat_id, poll.status
-    db.delete_poll(poll)
-    await query.answer(f"Опрос {poll_id} окончательно удален.", show_alert=True)
-    await show_poll_list(query, chat_id, status)
+    await delete_poll(query, poll_id)
+
+def _get_webapp_management_menu(chat_id: int):
+    """Builds the text and keyboard for the Web App management menu."""
+    web_apps = db.get_web_apps_for_chat(chat_id)
+    kb = [[InlineKeyboardButton("➕ Добавить приложение", callback_data=f"dash:webapp_add_start:{chat_id}")]]
+    
+    if web_apps:
+        for app in web_apps:
+            kb.append([
+                InlineKeyboardButton(app.name, callback_data=f"dash:webapp_view:{app.id}"),
+                InlineKeyboardButton("🗑️", callback_data=f"dash:webapp_delete_confirm:{app.id}")
+            ])
+            
+    kb.append([InlineKeyboardButton("↩️ Назад", callback_data=f"dash:group_dashboard:{chat_id}")])
+    
+    text = "⚙️ *Управление Web Apps*\n\nЗдесь вы можете добавлять, просматривать и удалять свои веб-приложения."
+    return text, InlineKeyboardMarkup(kb)
+
+async def show_webapp_management_menu(query: CallbackQuery, chat_id: int):
+    """Shows the Web App management menu by editing a message."""
+    text, reply_markup = _get_webapp_management_menu(chat_id)
+    
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
+    except telegram.error.BadRequest as e:
+        if "Message is not modified" not in str(e):
+            logger.error(f"Error in show_webapp_management_menu: {e}")
+
+
+async def webapp_add_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Starts the wizard to add a new Web App."""
+    context.user_data['wizard_state'] = 'waiting_for_webapp_name'
+    context.user_data['wizard_chat_id'] = chat_id
+    
+    # Store message to edit later
+    context.user_data['message_to_edit'] = query.message.message_id
+    
+    await query.edit_message_text(
+        "Введите короткое, понятное название для вашего Web App (например, *Ежедневное голосование*):",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:webapp_menu:{chat_id}")]]),
+        parse_mode=ParseMode.MARKDOWN_V2
+    )
+
+async def webapp_delete_confirm(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, app_id: int):
+    """Asks for confirmation before deleting a web app."""
+    # We don't have app details here without another DB call, so keep it generic.
+    text = "Вы уверены, что хотите удалить это Web App? Это действие нельзя будет отменить."
+    # We need chat_id to get back, but we don't have it here. This is a design flaw to fix later if needed.
+    # For now, we'll send the user back to the chat selection.
+    kb = [
+        [InlineKeyboardButton("✅ Да, удалить", callback_data=f"dash:webapp_delete_execute:{app_id}")],
+        [InlineKeyboardButton("❌ Нет, отмена", callback_data=f"dash:back_to_chats")]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
+
+async def webapp_delete_execute(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, app_id: int):
+    """Deletes a web app."""
+    # This is a bit of a hack. Since we don't have chat_id, we can't refresh the list.
+    # We'll just delete and send the user back to chat selection.
+    db.delete_web_app(app_id)
+    await query.answer("Web App удалено.", show_alert=True)
+    await private_chat_entry_point(update=query, context=context)
 
 async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Routes all callbacks starting with 'dash:'."""
@@ -419,4 +580,14 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
     elif command == "close_poll": await close_poll(query, context, int(params[0]))
     elif command == "reopen_poll": await reopen_poll(query, context, int(params[0]))
     elif command == "wizard_start": await wizard_start(query, context, int(params[0]))
+    elif command == "wizard_set_type": await wizard_set_type(query, context, params[0], int(params[1]))
+    elif command == "wizard_set_webapp": await wizard_set_webapp(query, context, int(params[0]))
+    elif command == "webapp_menu": await show_webapp_management_menu(query, int(params[0]))
+    elif command == "webapp_add_start": await webapp_add_start(query, context, int(params[0]))
+    elif command == "webapp_delete_confirm": await webapp_delete_confirm(query, context, int(params[0]))
+    elif command == "webapp_delete_execute": await webapp_delete_execute(query, context, int(params[0]))
+
+    # Dummy handler for no-op callbacks
+    elif command == "noop":
+        await query.answer()
     # Other handlers will be added here 

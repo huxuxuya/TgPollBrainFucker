@@ -95,16 +95,31 @@ async def legacy_vote_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("Ошибка: не удалось обработать старый формат голосования.", show_alert=True)
 
 
-async def vote_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles a vote button press by parsing new format and calling the core processor."""
+async def vote_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles a vote button press."""
     query = update.callback_query
+    user = query.from_user
+    
     try:
-        parts = query.data.split(':')
-        poll_id = int(parts[1])
-        option_index = int(parts[2])
-        user = update.effective_user
-        
-        await process_vote(query, context, poll_id, option_index, user)
-    except (IndexError, ValueError) as e:
-        logger.error(f"Error parsing vote_callback_handler data '{query.data}': {e}")
-        await query.answer("Ошибка: неверный формат данных для голосования.", show_alert=True) 
+        _, poll_id_str, option_index_str = query.data.split(':')
+        poll_id = int(poll_id_str)
+        option_index = int(option_index_str)
+    except (ValueError, IndexError) as e:
+        logger.error(f"Error parsing vote callback data '{query.data}': {e}")
+        await query.answer("Произошла ошибка при обработке вашего голоса.", show_alert=True)
+        return
+
+    logger.info(f"User {user.id} ({user.first_name}) voted on poll {poll_id} with option {option_index}")
+
+    await query.answer(f"Ваш голос засчитан!")
+
+    db.add_or_update_response(
+        poll_id=poll_id,
+        user_id=user.id,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        username=user.username,
+        option_index=option_index
+    )
+
+    await update_poll_message(poll_id, context) 
