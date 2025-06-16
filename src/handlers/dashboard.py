@@ -13,10 +13,11 @@ from src.display import generate_poll_text
 async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     """Starts the poll creation wizard by asking for the poll type."""
     context.user_data['wizard_chat_id'] = chat_id
+    context.user_data['message_to_edit'] = query.message.message_id # Save message ID
     
     keyboard = [
-        [InlineKeyboardButton("📊 Обычный опрос", callback_data=f"dash:wizard_set_type:native:{chat_id}")],
-        [InlineKeyboardButton("🌐 Web App опрос", callback_data=f"dash:wizard_set_type:webapp:{chat_id}")],
+        [InlineKeyboardButton("📊 Обычный опрос (кнопки в чате)", callback_data=f"dash:wizard_set_type:native:{chat_id}")],
+        [InlineKeyboardButton("🌐 Web App опрос (отдельная страница)", callback_data=f"dash:wizard_set_type:webapp:{chat_id}")],
         [InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]
     ]
     
@@ -28,30 +29,12 @@ async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE,
 async def wizard_set_type(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_type: str, chat_id: int):
     """Handles the poll type selection and proceeds to the next step."""
     context.user_data['wizard_poll_type'] = poll_type
+    context.user_data['wizard_state'] = 'waiting_for_poll_title'
     
-    if poll_type == 'native':
-        context.user_data['wizard_state'] = 'waiting_for_title'
-        await query.edit_message_text(
-            "Введите название опроса. Вы сможете его изменить позже.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]])
-        )
-    elif poll_type == 'webapp':
-        web_apps = db.get_web_apps(chat_id)
-        if not web_apps:
-            await query.answer("Сначала добавьте хотя бы одно Web App в меню управления Web Apps.", show_alert=True)
-            await show_group_dashboard(query, context, chat_id)
-            return
-
-        kb_rows = []
-        for app in web_apps:
-            kb_rows.append([InlineKeyboardButton(app.name, callback_data=f"dash:wizard_set_webapp:{app.id}")])
-        
-        kb_rows.append([InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")])
-        
-        await query.edit_message_text(
-            "Выберите Web App для этого опроса:",
-            reply_markup=InlineKeyboardMarkup(kb_rows)
-        )
+    await query.edit_message_text(
+        "Введите название (заголовок) для вашего опроса.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]])
+    )
 
 async def wizard_set_webapp(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, web_app_id: int):
     """Sets the web app for the poll and asks for the poll title."""
@@ -83,8 +66,8 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
             options = poll.options.split(',')
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
         elif poll.poll_type == 'webapp':
-            from telegram.WebAppInfo import WebAppInfo
-            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=poll.options))]]
+            url = f"{WEB_URL}/vote/{poll.poll_id}"
+            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=telegram.WebAppInfo(url=url))]]
 
         
         try:
@@ -164,7 +147,8 @@ async def reopen_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, 
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
         elif poll.poll_type == 'webapp':
             from telegram.WebAppInfo import WebAppInfo
-            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=poll.options))]]
+            url = f"{WEB_URL}/vote/{poll.poll_id}"
+            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
 
         try:
             if poll.message_id:
@@ -308,16 +292,11 @@ async def show_group_dashboard(query: CallbackQuery, context: ContextTypes.DEFAU
     chat_title = db.get_group_title(chat_id)
     text = f"Панель управления для чата *{escape_markdown(chat_title, 2)}*:"
 
-    # Define the web_app object for the button
-    web_app_info = telegram.WebAppInfo(url=WEB_URL)
-
     keyboard = [
         [InlineKeyboardButton("📊 Активные опросы", callback_data=f'dash:polls:{chat_id}:active'),
          InlineKeyboardButton("📈 Завершенные", callback_data=f'dash:polls:{chat_id}:closed')],
         [InlineKeyboardButton("📝 Черновики", callback_data=f'dash:polls:{chat_id}:draft')],
         [InlineKeyboardButton("👥 Участники", callback_data=f'dash:participants_menu:{chat_id}')],
-        [InlineKeyboardButton("🌐 Web Apps", callback_data=f'dash:webapp_menu:{chat_id}'),
-         InlineKeyboardButton("📱 Простое Web App", web_app=web_app_info)],
         [InlineKeyboardButton("✏️ Создать опрос", callback_data=f'dash:wizard_start:{chat_id}')],
         [InlineKeyboardButton("🔙 К выбору чата", callback_data='dash:back_to_chats')]
     ]

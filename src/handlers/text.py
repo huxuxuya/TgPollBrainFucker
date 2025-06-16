@@ -199,7 +199,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     app_user_data = context.user_data
     state = app_user_data.get('wizard_state')
     
-    if not state or not state.startswith('waiting_for_poll_'):
+    if not (state and (state == 'waiting_for_poll_options' or state == 'waiting_for_title')):
         await update.message.reply_text("Нет активного процесса создания опроса.", quote=False)
         return
         
@@ -216,29 +216,31 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not all([chat_id, title, message_to_edit]):
         logger.error(f"Cannot complete wizard, context is missing data: {app_user_data}")
         _clean_wizard_context(context)
+        await context.bot.edit_message_text(
+            "Произошла ошибка, не вся информация для создания опроса была найдена. Мастер отменен.", 
+            chat_id=chat_id, 
+            message_id=message_to_edit
+        )
         return
 
-    if poll_type == 'native':
-        options = app_user_data.get('wizard_options', [])
-        if not options:
-            await context.bot.edit_message_text("Вы не добавили ни одного варианта. Мастер отменен.", chat_id=chat_id, message_id=message_to_edit)
-        else:
-            new_poll = db.Poll(chat_id=chat_id, message=title, status='draft', options=','.join(options), poll_type='native')
-            db.add_poll(new_poll)
-            await context.bot.edit_message_text(f"✅ Черновик обычного опроса '{title}' создан!\nВы можете управлять им из меню черновиков.", chat_id=chat_id, message_id=message_to_edit)
-
-    elif poll_type == 'webapp':
-        webapp_id = app_user_data.get('wizard_webapp_id')
-        session = db.SessionLocal()
-        try:
-            webapp = session.query(db.WebApp).filter_by(id=webapp_id).first()
-            if not webapp:
-                 await context.bot.edit_message_text("Ошибка: Web App не найдено. Мастер отменен.", chat_id=chat_id, message_id=message_to_edit)
-            else:
-                new_poll = db.Poll(chat_id=chat_id, message=title, status='draft', options=webapp.url, poll_type='webapp')
-                db.add_poll(new_poll)
-                await context.bot.edit_message_text(f"✅ Черновик Web App опроса '{title}' создан!\nВы можете управлять им из меню черновиков.", chat_id=chat_id, message_id=message_to_edit)
-        finally:
-            session.close()
+    options = app_user_data.get('wizard_options', [])
+    if not options:
+        await context.bot.edit_message_text("Вы не добавили ни одного варианта. Мастер отменен.", chat_id=chat_id, message_id=message_to_edit)
+    else:
+        new_poll = db.Poll(
+            chat_id=chat_id, 
+            message=title, 
+            status='draft', 
+            options=','.join(options), 
+            poll_type=poll_type
+        )
+        db.add_poll(new_poll)
+        
+        type_text = "Web App опроса" if poll_type == 'webapp' else "обычного опроса"
+        await context.bot.edit_message_text(
+            f"✅ Черновик {type_text} '{title}' создан!\nВы можете управлять им из меню черновиков.",
+            chat_id=chat_id,
+            message_id=message_to_edit
+        )
 
     _clean_wizard_context(context) 

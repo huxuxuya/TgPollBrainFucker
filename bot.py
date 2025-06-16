@@ -5,7 +5,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram import Update
 
 from src.config import BOT_TOKEN, logger, WEB_URL
-from src.database import init_database
+from src.database import init_database, get_poll
 from src.handlers import admin, dashboard, voting, text, results, misc, base, settings
 
 # --- Initialize Application and Handlers ---
@@ -35,9 +35,25 @@ application.add_error_handler(base.error_handler)
 server = Flask(__name__)
 
 @server.route("/")
-def index():
-    """Serves the main web application page."""
-    return render_template("index.html")
+def root():
+    """A simple root endpoint to confirm the server is running."""
+    return "Web server is running."
+
+@server.route("/vote/<int:poll_id>")
+def vote_page(poll_id: int):
+    """Serves the voting page for a specific poll."""
+    poll = get_poll(poll_id)
+    if not poll:
+        return "Poll not found", 404
+    
+    options = [opt.strip() for opt in poll.options.split(',')]
+    
+    return render_template(
+        "vote.html", 
+        poll_title=poll.message, 
+        poll_options=options, 
+        poll_id=poll.poll_id
+    )
 
 @server.post("/telegram")
 async def telegram() -> str:
