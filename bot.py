@@ -1,4 +1,4 @@
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, TypeHandler
 from telegram import Update
 
 from src.config import BOT_TOKEN, logger
@@ -16,6 +16,9 @@ def main() -> None:
 
     # --- Register Handlers ---
     
+    # This handler runs first to ensure the bot knows about every chat it's in.
+    application.add_handler(TypeHandler(Update, base.track_chats), group=-1)
+    
     # Command Handlers
     application.add_handler(CommandHandler("start", base.start))
     application.add_handler(CommandHandler("help", base.help_command))
@@ -29,6 +32,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(voting.vote_callback_handler, pattern="^vote:"))
     application.add_handler(CallbackQueryHandler(results.results_callback_handler, pattern="^res:"))
     application.add_handler(CallbackQueryHandler(settings.settings_callback_handler, pattern="^settings:"))
+    # Catch-all for other button presses not caught by specific handlers
+    application.add_handler(CallbackQueryHandler(base.unrecognized_button))
 
     
     # Message Handlers
