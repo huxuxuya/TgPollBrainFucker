@@ -15,6 +15,11 @@ except KeyError:
 # The previous logic of setting it on the first use of /backup is fragile.
 BOT_OWNER_ID = int(os.environ.get('BOT_OWNER_ID', 0))
 
+# URL for the web app, required for webhook setup
+WEB_URL = os.environ.get('WEB_URL')
+if not WEB_URL:
+    raise RuntimeError('Environment variable WEB_URL is not set!')
+
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///poll_data.db")
 DATABASE_PATH = DATABASE_URL.split("///")[-1] if DATABASE_URL.startswith("sqlite:///") else "poll_data.db"
 

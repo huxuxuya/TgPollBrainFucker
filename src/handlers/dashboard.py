@@ -7,7 +7,7 @@ import asyncio
 import time
 
 from src import database as db
-from src.config import logger
+from src.config import logger, WEB_URL
 from src.display import generate_poll_text
 
 async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -307,12 +307,17 @@ async def private_chat_entry_point(update: Update, context: ContextTypes.DEFAULT
 async def show_group_dashboard(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     chat_title = db.get_group_title(chat_id)
     text = f"Панель управления для чата *{escape_markdown(chat_title, 2)}*:"
+
+    # Define the web_app object for the button
+    web_app_info = telegram.WebAppInfo(url=WEB_URL)
+
     keyboard = [
         [InlineKeyboardButton("📊 Активные опросы", callback_data=f'dash:polls:{chat_id}:active'),
          InlineKeyboardButton("📈 Завершенные", callback_data=f'dash:polls:{chat_id}:closed')],
         [InlineKeyboardButton("📝 Черновики", callback_data=f'dash:polls:{chat_id}:draft')],
         [InlineKeyboardButton("👥 Участники", callback_data=f'dash:participants_menu:{chat_id}')],
-        [InlineKeyboardButton("🌐 Web Apps", callback_data=f'dash:webapp_menu:{chat_id}')],
+        [InlineKeyboardButton("🌐 Web Apps", callback_data=f'dash:webapp_menu:{chat_id}'),
+         InlineKeyboardButton("📱 Простое Web App", web_app=web_app_info)],
         [InlineKeyboardButton("✏️ Создать опрос", callback_data=f'dash:wizard_start:{chat_id}')],
         [InlineKeyboardButton("🔙 К выбору чата", callback_data='dash:back_to_chats')]
     ]
