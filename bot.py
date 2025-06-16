@@ -1,6 +1,10 @@
 import asyncio
 import os
-from flask import Flask, render_template, request
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse, JSONResponse
+from starlette.templating import Jinja2Templates
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, TypeHandler
 from telegram import Update
 
@@ -31,35 +35,42 @@ application.add_handler(MessageHandler(filters.FORWARDED, misc.forwarded_message
 application.add_error_handler(base.error_handler)
 
 
-# --- Initialize Flask Server ---
-server = Flask(__name__)
+# --- Initialize Starlette Server and Routes ---
+templates = Jinja2Templates(directory="templates")
 
-@server.route("/")
-def root():
+async def root(request: Request):
     """A simple root endpoint to confirm the server is running."""
-    return "Web server is running."
+    return PlainTextResponse("Web server is running.")
 
-@server.route("/vote/<int:poll_id>")
-def vote_page(poll_id: int):
+async def vote_page(request: Request):
     """Serves the voting page for a specific poll."""
+    poll_id = request.path_params['poll_id']
     poll = get_poll(poll_id)
     if not poll:
-        return "Poll not found", 404
+        return PlainTextResponse("Poll not found", status_code=404)
     
     options = [opt.strip() for opt in poll.options.split(',')]
     
-    return render_template(
-        "vote.html", 
-        poll_title=poll.message, 
-        poll_options=options, 
-        poll_id=poll.poll_id
-    )
+    context = {
+        "request": request,
+        "poll_title": poll.message, 
+        "poll_options": options, 
+        "poll_id": poll.poll_id
+    }
+    return templates.TemplateResponse("vote.html", context)
 
-@server.post("/telegram")
-async def telegram() -> str:
+async def telegram_webhook(request: Request) -> JSONResponse:
     """Handles incoming Telegram updates by passing them to the application."""
-    await application.update_queue.put(Update.de_json(data=request.get_json(force=True), bot=application.bot))
-    return "OK"
+    await application.update_queue.put(Update.de_json(data=await request.json(), bot=application.bot))
+    return JSONResponse({"ok": True})
+
+routes = [
+    Route("/", endpoint=root),
+    Route("/vote/{poll_id:int}", endpoint=vote_page),
+    Route("/telegram", endpoint=telegram_webhook, methods=["POST"]),
+]
+
+server = Starlette(routes=routes)
 
 async def setup():
     """Initializes the bot and sets the webhook."""
@@ -69,11 +80,8 @@ async def setup():
     # We need to run the bot in a separate task
     await application.bot.set_webhook(url=f"{WEB_URL}/telegram", allowed_updates=Update.ALL_TYPES)
     
-    # The Flask server will be run by Gunicorn, not here.
-    # We just need to ensure the bot is ready.
     # We use initialize() instead of start() to not block.
     await application.initialize()
-
 
 # The main entry point is now running the `setup` async function
 if __name__ == "__main__":
