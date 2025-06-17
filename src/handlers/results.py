@@ -1,11 +1,11 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 import telegram
 import asyncio
 
 from src import database as db
-from src.config import logger
+from src.config import logger, WEB_URL
 from src.display import generate_poll_text, generate_nudge_text
 
 async def show_draft_poll_menu(context: ContextTypes.DEFAULT_TYPE, poll_id: int, chat_id: int, message_id: int):
@@ -160,8 +160,8 @@ async def move_to_bottom_handler(update: Update, context: ContextTypes.DEFAULT_T
             options = poll.options.split(',')
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
         elif poll.poll_type == 'webapp':
-            from telegram.WebAppInfo import WebAppInfo
-            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=poll.options))]]
+            url = f"{WEB_URL}/vote/{poll.poll_id}"
+            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
         
         try:
             new_message = await context.bot.send_message(chat_id=poll.chat_id, text=new_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
