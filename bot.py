@@ -1,7 +1,8 @@
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from starlette.applications import Starlette
-from starlette.routing import Route
+from starlette.routing import Route, Mount
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, JSONResponse
 from starlette.templating import Jinja2Templates
@@ -12,8 +13,7 @@ from src.config import BOT_TOKEN, logger, WEB_URL
 from src.database import init_database, get_poll
 from src.handlers import admin, dashboard, voting, text, results, misc, base, settings
 
-# --- Initialize Application and Handlers ---
-# Create the Application and pass it your bot's token.
+# --- PTB Application Setup ---
 application = Application.builder().token(BOT_TOKEN).build()
 
 # Register all handlers
@@ -35,7 +35,21 @@ application.add_handler(MessageHandler(filters.FORWARDED, misc.forwarded_message
 application.add_error_handler(base.error_handler)
 
 
-# --- Initialize Starlette Server and Routes ---
+# --- Lifespan and Starlette Server Setup ---
+@asynccontextmanager
+async def lifespan(app: Starlette):
+    """Handles bot startup and shutdown when the server starts and stops."""
+    logger.info("Server starting up...")
+    init_database()
+    await application.bot.set_webhook(url=f"{WEB_URL}/telegram", allowed_updates=Update.ALL_TYPES)
+    async with application:
+        await application.start()
+        logger.info("Bot started.")
+        yield
+        logger.info("Server shutting down...")
+        await application.stop()
+        logger.info("Bot stopped.")
+
 templates = Jinja2Templates(directory="templates")
 
 async def root(request: Request):
@@ -70,19 +84,6 @@ routes = [
     Route("/telegram", endpoint=telegram_webhook, methods=["POST"]),
 ]
 
-server = Starlette(routes=routes)
+server = Starlette(routes=routes, lifespan=lifespan)
 
-async def setup():
-    """Initializes the bot and sets the webhook."""
-    # Initialize the database
-    init_database()
-    
-    # We need to run the bot in a separate task
-    await application.bot.set_webhook(url=f"{WEB_URL}/telegram", allowed_updates=Update.ALL_TYPES)
-    
-    # We use initialize() instead of start() to not block.
-    await application.initialize()
-
-# The main entry point is now running the `setup` async function
-if __name__ == "__main__":
-    asyncio.run(setup()) 
+# No need for a __main__ block anymore, gunicorn handles the launch. 
