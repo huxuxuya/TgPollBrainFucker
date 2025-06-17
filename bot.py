@@ -108,6 +108,9 @@ async def telegram_webhook(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 # --- Dynamic Route Mounting ---
+# We must load the apps *before* the routes are defined, so Starlette is aware of them.
+load_bundled_web_apps()
+
 routes = [
     Route("/", endpoint=root),
     Route("/telegram", endpoint=telegram_webhook, methods=["POST"]),
@@ -126,7 +129,6 @@ for app_id, app_data in BUNDLED_WEB_APPS.items():
 
 server = Starlette(routes=routes, lifespan=lifespan)
 
-# No need for a __main__ block anymore, gunicorn handles the launch.
 async def main() -> None:
     """Starts the bot in polling mode for local development."""
     logger.info("Running in development mode (polling)...")
@@ -145,10 +147,9 @@ async def main() -> None:
 
 if __name__ == "__main__":
     if DEV_MODE:
-        # We need to load apps before the event loop starts for routes to be registered
-        load_bundled_web_apps()
+        # The main() function handles loading apps for development polling mode.
         asyncio.run(main())
     else:
-        # For production, Gunicorn will find `server`, but we need to ensure apps are loaded beforehand.
-        load_bundled_web_apps()
-        logger.warning("Running in production mode. This script should be run by an ASGI server like Gunicorn, not directly.") 
+        # For production, Gunicorn will find the `server` object.
+        # The top-level call to `load_bundled_web_apps()` ensures the routes are ready.
+        logger.info("Running in production mode. This script should be run by an ASGI server like Gunicorn.") 
