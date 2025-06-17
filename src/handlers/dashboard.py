@@ -115,20 +115,26 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
         kb = []
         if poll.poll_type == 'native':
             # Consolidated, robust validation for native poll options.
-            # This check ensures the options string exists and that it doesn't contain empty options.
             if not poll.options or any(not opt.strip() for opt in poll.options.split(',')):
                 await query.answer('Ошибка: опрос содержит пустые или некорректные варианты ответов. Пожалуйста, отредактируйте их в настройках.', show_alert=True)
                 return
             
             options = poll.options.split(',')
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+        
         elif poll.poll_type == 'webapp':
             if not poll.web_app_id:
                 await query.answer('Ошибка: для этого опроса не задан ID веб-приложения.', show_alert=True)
                 return
             url = f"{WEB_URL}/web_apps/{poll.web_app_id}/?poll_id={poll.poll_id}"
-            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
+            kb = [
+                [InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))],
+                [InlineKeyboardButton("🔄 Обновить", callback_data=f"results:refresh:{poll.poll_id}")]
+            ]
 
+        # Final debug logging before sending
+        logger.info(f"[DEBUG_START_POLL] Final text being sent: '{initial_text.replace('\n', ' ')}'")
+        logger.info(f"[DEBUG_START_POLL] Keyboard object: {kb}")
         
         try:
             msg = await context.bot.send_message(chat_id=poll.chat_id, text=initial_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
@@ -138,7 +144,7 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
             await query.answer(f'Опрос {poll.poll_id} запущен.', show_alert=True)
             await show_poll_list(query, poll.chat_id, 'draft')
         except Exception as e:
-            logger.error(f"Ошибка запуска опроса {poll_id}: {e}")
+            logger.error(f"Ошибка запуска опроса {poll_id}: {e}", exc_info=True)
             await query.answer(f'Ошибка: {e}', show_alert=True)
     finally:
         session.close()
