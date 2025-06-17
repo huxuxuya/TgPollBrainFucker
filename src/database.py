@@ -350,11 +350,14 @@ def get_response(poll_id: int, user_id: int):
     session.close()
     return response
 
-def add_poll(poll: Poll):
+def add_poll(poll: Poll) -> int:
+    """Adds a poll to the database and returns its new ID."""
     session = SessionLocal()
     session.add(poll)
     session.commit()
+    poll_id = poll.poll_id
     session.close()
+    return poll_id
 
 def add_response(response: Response):
     session = SessionLocal()

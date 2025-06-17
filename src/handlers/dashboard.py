@@ -1,4 +1,4 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, WebAppInfo
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
@@ -67,7 +67,7 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
         elif poll.poll_type == 'webapp':
             url = f"{WEB_URL}/vote/{poll.poll_id}"
-            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=telegram.WebAppInfo(url=url))]]
+            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
 
         
         try:
@@ -146,7 +146,6 @@ async def reopen_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, 
             options = poll.options.split(',')
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
         elif poll.poll_type == 'webapp':
-            from telegram.WebAppInfo import WebAppInfo
             url = f"{WEB_URL}/vote/{poll.poll_id}"
             kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
 

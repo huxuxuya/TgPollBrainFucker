@@ -8,6 +8,38 @@ from src import database as db
 from src.config import logger
 from src.display import generate_poll_text, generate_nudge_text
 
+async def show_draft_poll_menu(context: ContextTypes.DEFAULT_TYPE, poll_id: int, chat_id: int, message_id: int):
+    """Displays the management menu for a newly created draft poll."""
+    poll = db.get_poll(poll_id)
+    if not poll:
+        # This should not happen in the normal flow
+        await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="Ошибка: созданный опрос не найден.")
+        return
+
+    text = generate_poll_text(poll_id)
+    kb_rows = [
+        [
+            InlineKeyboardButton("▶️ Запустить", callback_data=f"dash:start_poll:{poll_id}"),
+            InlineKeyboardButton("🗑️ Удалить", callback_data=f"dash:delete_poll_confirm:{poll_id}")
+        ],
+        [InlineKeyboardButton("⚙️ Настроить", callback_data=f"settings:poll_menu:{poll_id}")],
+        [InlineKeyboardButton("↩️ К списку черновиков", callback_data=f"dash:polls:{poll.chat_id}:draft")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(kb_rows)
+    
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN_V2
+        )
+    except telegram.error.BadRequest as e:
+        if "Message is not modified" not in str(e):
+            logger.error(f"Error showing draft poll menu for poll {poll_id}: {e}")
+
 async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_id: int):
     """Displays the results of a poll with action buttons."""
     query = update.callback_query

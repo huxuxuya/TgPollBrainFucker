@@ -4,7 +4,7 @@ import asyncio
 
 from src import database as db
 from src.config import logger
-from src.handlers import dashboard, settings
+from src.handlers import dashboard, settings, results
 
 # --- Main router ---
 
@@ -234,11 +234,12 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             options=','.join(options), 
             poll_type=poll_type
         )
-        db.add_poll(new_poll)
+        new_poll_id = db.add_poll(new_poll)
         
-        type_text = "Web App опроса" if poll_type == 'webapp' else "обычного опроса"
-        await context.bot.edit_message_text(
-            f"✅ Черновик {type_text} '{title}' создан!\nВы можете управлять им из меню черновиков.",
+        # Instead of showing text, show the management menu
+        await results.show_draft_poll_menu(
+            context=context,
+            poll_id=new_poll_id,
             chat_id=chat_id,
             message_id=message_to_edit
         )
