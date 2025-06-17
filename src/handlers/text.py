@@ -68,13 +68,22 @@ async def _handle_poll_creation(update: Update, context: ContextTypes.DEFAULT_TY
                 )
                 return
             
-            # WebApp polls don't need options defined in the bot DB.
-            # We use a placeholder to pass the validation checks.
+            # For webapp polls, we check the manifest for predefined options.
+            app_manifest = context.bot_data.get('BUNDLED_WEB_APPS', {}).get(web_app_id, {})
+            predefined_options = app_manifest.get('options')
+
+            options_str = None
+            if predefined_options and isinstance(predefined_options, list):
+                options_str = ','.join(predefined_options)
+            else:
+                # Fallback for simple web apps without predefined options
+                options_str = 'Web App Poll'
+
             new_poll = db.Poll(
                 chat_id=chat_id,
                 message=title,
                 status='draft',
-                options='Web App Poll', # Placeholder, not shown to user
+                options=options_str,
                 poll_type='webapp',
                 web_app_id=web_app_id
             )

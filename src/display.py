@@ -42,15 +42,18 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
         responses = db.get_responses(poll_id)
         
         # --- Determine the options to display ---
-        # For native polls, use the pre-defined options.
-        # For webapp polls, dynamically discover options from what users have actually voted for.
+        # Start with the options defined in the poll.
         display_options = []
-        if poll.poll_type == 'native':
-            display_options = [opt.strip() for opt in poll.options.split(',')]
-        else: # For 'webapp' and other potential future types
-            if responses:
-                # Get unique responses, preserving order of first appearance
-                display_options = list(dict.fromkeys(r.response.strip() for r in responses))
+        if poll.options and poll.options != 'Web App Poll': # Avoid the old placeholder
+             display_options = [opt.strip() for opt in poll.options.split(',')]
+        
+        # For any poll type, dynamically add options found in responses
+        # that aren't already in our list. This makes it robust.
+        if responses:
+            voted_options = list(dict.fromkeys(r.response.strip() for r in responses))
+            for opt in voted_options:
+                if opt not in display_options:
+                    display_options.append(opt)
 
         votes_by_option = {opt: [] for opt in display_options}
         user_votes = {} # To track which option a user voted for

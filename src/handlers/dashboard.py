@@ -83,10 +83,25 @@ async def wizard_select_webapp(query: CallbackQuery, context: ContextTypes.DEFAU
 
 async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int):
     """Activates a draft poll and sends it to the group."""
+    logger.info(f"Attempting to start poll_id: {poll_id}")
     session = db.SessionLocal()
     try:
         poll = session.query(db.Poll).filter_by(poll_id=poll_id).first()
-        if not poll or poll.status != 'draft':
+        
+        if not poll:
+            logger.error(f"start_poll: Poll {poll_id} not found in database.")
+            await query.answer('Опрос не найден.', show_alert=True)
+            return
+
+        # Add detailed debug logging
+        logger.info(
+            f"[DEBUG_START_POLL] Poll {poll_id} data: "
+            f"type='{poll.poll_type}', status='{poll.status}', "
+            f"options='{poll.options}', "
+            f"web_app_id='{poll.web_app_id}'"
+        )
+
+        if poll.status != 'draft':
             await query.answer('Опрос не является черновиком или не найден.', show_alert=True)
             return
 
