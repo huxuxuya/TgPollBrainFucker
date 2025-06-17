@@ -24,6 +24,8 @@ application.add_handler(CommandHandler("dashboard", dashboard.private_chat_entry
 application.add_handler(CommandHandler("done", text.done_command))
 application.add_handler(CommandHandler("backup", admin.backup))
 application.add_handler(CommandHandler("restore", admin.restore))
+application.add_handler(CommandHandler("export_json", admin.export_json))
+application.add_handler(CommandHandler("import_json", admin.import_json))
 application.add_handler(CallbackQueryHandler(dashboard.dashboard_callback_handler, pattern="^dash:"))
 application.add_handler(CallbackQueryHandler(voting.vote_callback_handler, pattern="^vote:"))
 application.add_handler(CallbackQueryHandler(results.results_callback_handler, pattern="^res:"))
