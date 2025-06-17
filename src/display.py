@@ -83,9 +83,13 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
             text_parts.insert(0, "*ОПРОС ЗАВЕРШЕН*")
             text_parts.insert(1, "\\-\\-\\-") # Separator
 
-        # For webapp polls, there are no saved settings per option, so we just iterate through
-        # the dynamically found options.
-        if poll.poll_type == 'webapp':
+        # For webapp polls, if there are no votes yet, don't show the options list.
+        # This avoids a Telegram API conflict on the initial message send.
+        if poll.poll_type == 'webapp' and total_votes == 0:
+            # The text will just be the title and the total votes (0).
+            pass
+        # For webapp polls WITH votes, or for all native polls:
+        elif poll.poll_type == 'webapp':
             for option_text in display_options:
                 count = counts.get(option_text, 0)
                 escaped_option_text = escape_markdown(option_text, version=2)
