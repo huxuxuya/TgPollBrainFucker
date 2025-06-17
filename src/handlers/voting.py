@@ -1,15 +1,15 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, WebAppInfo
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, RetryAfter
 import asyncio
 
 from src import database as db
-from src.config import logger
+from src.config import logger, WEB_URL
 from src.display import generate_poll_text # Or a smaller update function
 
 async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Refreshes the poll message after a vote."""
+    """Refreshes the poll message after a vote, handling both native and webapp polls."""
     # This is a simplified version of the update logic.
     # A full implementation would handle errors and chat migrations.
     try:
@@ -17,19 +17,28 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
         if not poll or not poll.message_id: return
 
         text = generate_poll_text(poll_id)
-        options = poll.options.split(',')
-        keyboard = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll_id}:{i}')] for i, opt in enumerate(options)]
         
+        kb = []
+        if poll.poll_type == 'native':
+            options = poll.options.split(',')
+            kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll_id}:{i}')] for i, opt in enumerate(options)]
+        elif poll.poll_type == 'webapp':
+            if not poll.web_app_id:
+                logger.error(f"Cannot update webapp poll {poll_id}, web_app_id is missing.")
+                return
+            url = f"{WEB_URL}/web_apps/{poll.web_app_id}/?poll_id={poll.poll_id}"
+            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
+
         await context.bot.edit_message_text(
             text=text,
             chat_id=poll.chat_id,
             message_id=poll.message_id,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='MarkdownV2'
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode=ParseMode.MARKDOWN_V2
         )
     except Exception as e:
         if "Message is not modified" not in str(e):
-             logger.error(f"Failed to edit message for poll {poll_id}: {e}")
+             logger.error(f"Failed to edit message for poll {poll_id}: {e}", exc_info=True)
 
 
 async def process_vote(

@@ -110,10 +110,11 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
             await query.answer('Текст (заголовок) опроса не задан. Отредактируйте его в настройках.', show_alert=True)
             return
 
-        initial_text = generate_poll_text(poll=poll, session=session)
+        initial_text = "" # Will be set inside the blocks
         
         kb = []
         if poll.poll_type == 'native':
+            initial_text = generate_poll_text(poll=poll, session=session)
             # Consolidated, robust validation for native poll options.
             if not poll.options or any(not opt.strip() for opt in poll.options.split(',')):
                 await query.answer('Ошибка: опрос содержит пустые или некорректные варианты ответов. Пожалуйста, отредактируйте их в настройках.', show_alert=True)
@@ -126,6 +127,12 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
             if not poll.web_app_id:
                 await query.answer('Ошибка: для этого опроса не задан ID веб-приложения.', show_alert=True)
                 return
+
+            # For the initial message with a web_app button, the text MUST be simple.
+            # It cannot contain entities that look like poll results. We send only the title.
+            # The full results (with counts, names, etc.) will be shown on the first update.
+            initial_text = escape_markdown(poll.message, 2)
+
             url = f"{WEB_URL}/web_apps/{poll.web_app_id}/?poll_id={poll.poll_id}"
             # A keyboard with a WebApp button cannot be mixed with other button types.
             kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
