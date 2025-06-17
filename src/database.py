@@ -59,20 +59,12 @@ class Poll(Base):
     options = Column(Text)
     status = Column(String, default='draft')
     poll_type = Column(String, default='native', nullable=False)
-    web_app_id = Column(Integer, ForeignKey('web_apps.id'), nullable=True)
+    web_app_id = Column(String, nullable=True)
     message_id = Column(BigInteger)
     nudge_message_id = Column(BigInteger)
     
     # This relationship allows us to easily access responses via poll.responses
     responses = relationship("Response", backref="poll", cascade="all, delete-orphan")
-    web_app = relationship("WebApp")
-
-class WebApp(Base):
-    __tablename__ = 'web_apps'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    chat_id = Column(BigInteger, nullable=False)
-    name = Column(String, nullable=False)
-    url = Column(String, nullable=False)
 
 class Response(Base):
     __tablename__ = 'responses'
@@ -438,47 +430,6 @@ def delete_poll_option_settings(poll_id: int):
     except Exception as e:
         logger.error(f"Error deleting poll option settings for poll {poll_id}: {e}")
         session.rollback()
-    finally:
-        session.close()
-
-def get_web_apps(chat_id: int) -> List[WebApp]:
-    """Fetches all registered web apps for a given chat."""
-    session = SessionLocal()
-    try:
-        return session.query(WebApp).filter_by(chat_id=chat_id).order_by(WebApp.name).all()
-    finally:
-        session.close()
-
-def add_web_app(chat_id: int, name: str, url: str):
-    """Adds a new web app to the database."""
-    session = SessionLocal()
-    try:
-        new_app = WebApp(chat_id=chat_id, name=name, url=url)
-        session.add(new_app)
-        session.commit()
-    except Exception as e:
-        logger.error(f"Error adding web app: {e}")
-        session.rollback()
-    finally:
-        session.close()
-
-def delete_web_app(app_id: int):
-    """Deletes a web app by its ID."""
-    session = SessionLocal()
-    try:
-        app_to_delete = session.query(WebApp).filter_by(id=app_id).first()
-        if app_to_delete:
-            session.delete(app_to_delete)
-            session.commit()
-            logger.info(f"Deleted Web App with ID {app_id}")
-    finally:
-        session.close()
-
-def get_web_app(app_id: int) -> WebApp:
-    """Fetches a single web app by its ID."""
-    session = SessionLocal()
-    try:
-        return session.query(WebApp).filter_by(id=app_id).first()
     finally:
         session.close()
 

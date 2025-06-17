@@ -160,12 +160,12 @@ async def move_to_bottom_handler(update: Update, context: ContextTypes.DEFAULT_T
             options = poll.options.split(',')
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
         elif poll.poll_type == 'webapp':
-            if not poll.web_app:
+            if not poll.web_app_id:
                 # We can't easily alert the user here, but we can log it.
-                logger.error(f"Cannot move poll {poll_id} to bottom, associated web app not found.")
+                logger.error(f"Cannot move poll {poll_id} to bottom, associated web app id not found.")
                 session.close()
                 return
-            url = poll.web_app.url
+            url = f"{WEB_URL}/web_apps/{poll.web_app_id}/?poll_id={poll.poll_id}"
             kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
         
         try:

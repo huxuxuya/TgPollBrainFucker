@@ -67,45 +67,6 @@ async def _handle_poll_creation(update: Update, context: ContextTypes.DEFAULT_TY
         await context.bot.edit_message_text(prompt, chat_id=update.effective_chat.id, message_id=message_to_edit, parse_mode='MarkdownV2')
 
 
-async def _handle_webapp_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles text input during the Web App creation wizard."""
-    state = context.user_data.get('wizard_state')
-    text_input = update.message.text
-    app_user_data = context.user_data
-    
-    message_to_edit = app_user_data.get('message_to_edit')
-    chat_id = app_user_data.get('wizard_chat_id')
-    if not message_to_edit or not chat_id:
-        logger.error(f"Cannot handle webapp creation, context is missing data: {app_user_data}")
-        _clean_wizard_context(context)
-        return
-
-    if state == 'waiting_for_webapp_name':
-        app_user_data['wizard_webapp_name'] = text_input
-        app_user_data['wizard_state'] = 'waiting_for_webapp_url'
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_to_edit,
-            text="Отлично. Теперь введите полный URL вашего Web App, начиная с `https://`:"
-        )
-
-    elif state == 'waiting_for_webapp_url':
-        name = app_user_data['wizard_webapp_name']
-        url = text_input
-        db.add_web_app(chat_id, name, url)
-
-        # After adding, show the main webapp menu again
-        text, reply_markup = dashboard._get_webapp_management_menu(chat_id)
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_to_edit,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode='MarkdownV2'
-        )
-        _clean_wizard_context(context)
-
-
 async def _handle_settings_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles text input for changing poll or option settings."""
     text_input = update.message.text

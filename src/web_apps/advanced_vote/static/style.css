@@ -1,0 +1,67 @@
+/* Same as simple_vote for consistency */
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
+
+:root {
+    --tg-theme-bg-color: #ffffff;
+    --tg-theme-text-color: #000000;
+    --tg-theme-button-color: #007bff; /* Different button color */
+    --tg-theme-button-text-color: #ffffff;
+    --tg-theme-hint-color: #707579;
+    --tg-theme-secondary-bg-color: #f3f4f6;
+}
+
+body {
+    font-family: 'Roboto', sans-serif;
+    background-color: var(--tg-theme-bg-color);
+    color: var(--tg-theme-text-color);
+    margin: 0;
+    padding: 15px;
+    box-sizing: border-box;
+}
+
+.container {
+    max-width: 600px;
+    margin: 0 auto;
+    text-align: center;
+}
+
+h1 {
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 20px;
+}
+
+#options-container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.option-button {
+    width: 100%;
+    padding: 15px;
+    font-size: 16px;
+    font-weight: 500;
+    border: none;
+    border-radius: 8px;
+    background-color: var(--tg-theme-button-color);
+    color: var(--tg-theme-button-text-color);
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+}
+
+.option-button:hover {
+    background-color: #0056b3; 
+}
+
+.hint {
+    font-size: 14px;
+    color: var(--tg-theme-hint-color);
+    margin-top: 20px;
+}
+
+.feedback {
+    font-size: 18px;
+    padding: 20px;
+    color: var(--tg-theme-text-color);
+} 

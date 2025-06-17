@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ poll_title }}</title>
+    <link rel="stylesheet" href="static/style.css">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1 id="poll-title">{{ poll_title }}</h1>
+        <div id="options-container">
+            {% for option in poll_options %}
+                <button class="option-button" data-option="{{ option }}">{{ option }}</button>
+            {% endfor %}
+        </div>
+        <p class="hint">Ваш выбор будет немедленно отправлен в чат.</p>
+    </div>
+
+    <script>
+        document.addEventListener("DOMContentLoaded", () => {
+            const tg = window.Telegram.WebApp;
+            tg.ready();
+            
+            const pollId = '{{ poll_id }}';
+
+            document.querySelectorAll('.option-button').forEach(button => {
+                button.addEventListener('click', () => {
+                    const selectedOption = button.getAttribute('data-option');
+                    
+                    const dataToSend = {
+                        poll_id: parseInt(pollId),
+                        response: selectedOption
+                    };
+
+                    tg.sendData(JSON.stringify(dataToSend));
+                    
+                    // Optional: Provide feedback in the web app
+                    document.getElementById('options-container').innerHTML = `<p class="feedback">Спасибо, ваш голос за <b>${selectedOption}</b> учтён!</p>`;
+                    // tg.close(); // Uncomment to close the web app after voting
+                });
+            });
+        });
+    </script>
+</body>
+</html> 
