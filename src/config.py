@@ -24,7 +24,6 @@ if not DEV_MODE and not WEB_URL:
     raise RuntimeError('Environment variable WEB_URL is not set while not in DEV_MODE!')
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///poll_data.db")
-DATABASE_PATH = DATABASE_URL.split("///")[-1] if DATABASE_URL.startswith("sqlite:///") else "poll_data.db"
 
 # Enable logging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)

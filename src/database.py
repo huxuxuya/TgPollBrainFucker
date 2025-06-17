@@ -59,11 +59,13 @@ class Poll(Base):
     options = Column(Text)
     status = Column(String, default='draft')
     poll_type = Column(String, default='native', nullable=False)
+    web_app_id = Column(Integer, ForeignKey('web_apps.id'), nullable=True)
     message_id = Column(BigInteger)
     nudge_message_id = Column(BigInteger)
     
     # This relationship allows us to easily access responses via poll.responses
     responses = relationship("Response", backref="poll", cascade="all, delete-orphan")
+    web_app = relationship("WebApp")
 
 class WebApp(Base):
     __tablename__ = 'web_apps'
@@ -469,6 +471,14 @@ def delete_web_app(app_id: int):
             session.delete(app_to_delete)
             session.commit()
             logger.info(f"Deleted Web App with ID {app_id}")
+    finally:
+        session.close()
+
+def get_web_app(app_id: int) -> WebApp:
+    """Fetches a single web app by its ID."""
+    session = SessionLocal()
+    try:
+        return session.query(WebApp).filter_by(id=app_id).first()
     finally:
         session.close()
 

@@ -199,7 +199,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     app_user_data = context.user_data
     state = app_user_data.get('wizard_state')
     
-    if not (state and (state == 'waiting_for_poll_options' or state == 'waiting_for_title')):
+    if not (state and state == 'waiting_for_poll_options'):
         await update.message.reply_text("Нет активного процесса создания опроса.", quote=False)
         return
         
@@ -232,7 +232,8 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message=title, 
             status='draft', 
             options=','.join(options), 
-            poll_type=poll_type
+            poll_type=poll_type,
+            web_app_id=app_user_data.get('wizard_web_app_id')
         )
         new_poll_id = db.add_poll(new_poll)
         

@@ -10,7 +10,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram import Update
 
 from src.config import BOT_TOKEN, logger, WEB_URL, DEV_MODE
-from src.database import init_database, get_poll
+from src.database import init_database
 from src.handlers import admin, dashboard, voting, text, results, misc, base, settings
 
 # --- PTB Application Setup ---
@@ -22,8 +22,6 @@ application.add_handler(CommandHandler("start", base.start))
 application.add_handler(CommandHandler("help", base.help_command))
 application.add_handler(CommandHandler("dashboard", dashboard.private_chat_entry_point))
 application.add_handler(CommandHandler("done", text.done_command))
-application.add_handler(CommandHandler("backup", admin.backup))
-application.add_handler(CommandHandler("restore", admin.restore))
 application.add_handler(CommandHandler("export_json", admin.export_json))
 application.add_handler(CommandHandler("import_json", admin.import_json))
 application.add_handler(CallbackQueryHandler(dashboard.dashboard_callback_handler, pattern="^dash:"))
@@ -56,23 +54,6 @@ async def root(request: Request):
     """A simple root endpoint to confirm the server is running."""
     return PlainTextResponse("Web server is running.")
 
-async def vote_page(request: Request):
-    """Serves the voting page for a specific poll."""
-    poll_id = request.path_params['poll_id']
-    poll = get_poll(poll_id)
-    if not poll:
-        return PlainTextResponse("Poll not found", status_code=404)
-    
-    options = [opt.strip() for opt in poll.options.split(',')]
-    
-    context = {
-        "request": request,
-        "poll_title": poll.message, 
-        "poll_options": options, 
-        "poll_id": poll.poll_id
-    }
-    return templates.TemplateResponse("vote.html", context)
-
 async def telegram_webhook(request: Request) -> JSONResponse:
     """Handles incoming Telegram updates by passing them to the application for direct processing."""
     update_data = await request.json()
@@ -82,7 +63,6 @@ async def telegram_webhook(request: Request) -> JSONResponse:
 
 routes = [
     Route("/", endpoint=root),
-    Route("/vote/{poll_id:int}", endpoint=vote_page),
     Route("/telegram", endpoint=telegram_webhook, methods=["POST"]),
 ]
 

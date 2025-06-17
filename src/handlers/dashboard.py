@@ -7,8 +7,9 @@ import asyncio
 import time
 
 from src import database as db
-from src.config import logger, WEB_URL
+from src.config import logger, WEB_URL, BOT_OWNER_ID
 from src.display import generate_poll_text
+from src.handlers import admin
 
 async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     """Starts the poll creation wizard by asking for the poll type."""
@@ -29,20 +30,57 @@ async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE,
 async def wizard_set_type(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_type: str, chat_id: int):
     """Handles the poll type selection and proceeds to the next step."""
     context.user_data['wizard_poll_type'] = poll_type
-    context.user_data['wizard_state'] = 'waiting_for_poll_title'
     
+    if poll_type == 'native':
+        context.user_data['wizard_state'] = 'waiting_for_poll_title'
+        await query.edit_message_text(
+            "Введите название (заголовок) для вашего опроса.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]])
+        )
+    elif poll_type == 'webapp':
+        await wizard_show_webapp_selection(query, context, chat_id)
+
+async def wizard_show_webapp_selection(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """Shows a list of available web apps to attach to the poll."""
+    web_apps = db.get_web_apps(chat_id)
+    
+    if not web_apps:
+        kb = [
+            [InlineKeyboardButton("⚙️ Управлять Web Apps", callback_data=f"dash:webapp_menu:{chat_id}")],
+            [InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]
+        ]
+        await query.edit_message_text(
+            "Для этого чата не зарегистрировано ни одного Web App. Сначала добавьте его в меню управления.",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+        return
+
+    kb = []
+    for app in web_apps:
+        kb.append([InlineKeyboardButton(app.name, callback_data=f"dash:wizard_select_webapp:{app.id}")])
+    kb.append([InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")])
+
     await query.edit_message_text(
-        "Введите название (заголовок) для вашего опроса.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]])
+        "Выберите Web App, которое будет использоваться для этого опроса:",
+        reply_markup=InlineKeyboardMarkup(kb)
     )
 
-async def wizard_set_webapp(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, web_app_id: int):
-    """Sets the web app for the poll and asks for the poll title."""
-    context.user_data['wizard_webapp_id'] = web_app_id
-    context.user_data['wizard_state'] = 'waiting_for_title'
+async def wizard_select_webapp(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, app_id: int):
+    """Saves the selected web app and asks for the poll title."""
+    context.user_data['wizard_web_app_id'] = app_id
+    context.user_data['wizard_state'] = 'waiting_for_poll_title'
+
+    chat_id = context.user_data.get('wizard_chat_id')
+    if not chat_id:
+        await query.edit_message_text("Ошибка: ID чата не найден. Попробуйте начать заново.", reply_markup=None)
+        return
+
+    web_app = db.get_web_app(app_id)
+    app_name = web_app.name if web_app else f"ID {app_id}"
+    
     await query.edit_message_text(
-        "Вы выбрали Web App. Теперь введите название для этого опроса (например, *Еженедельная оценка*):",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{context.user_data['wizard_chat_id']}")]])
+        f"Вы выбрали '{escape_markdown(app_name, 2)}'\\.\n\nТеперь введите название \\(заголовок\\) для вашего опроса\\.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]])
     )
 
 # +++ Poll Actions Handlers (called from dashboard) +++
@@ -66,7 +104,11 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
             options = poll.options.split(',')
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
         elif poll.poll_type == 'webapp':
-            url = f"{WEB_URL}/vote/{poll.poll_id}"
+            if not poll.web_app:
+                await query.answer('Ошибка: связанное Web App не найдено. Возможно, оно было удалено.', show_alert=True)
+                session.close()
+                return
+            url = poll.web_app.url
             kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
 
         
@@ -146,7 +188,11 @@ async def reopen_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, 
             options = poll.options.split(',')
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
         elif poll.poll_type == 'webapp':
-            url = f"{WEB_URL}/vote/{poll.poll_id}"
+            if not poll.web_app:
+                await query.answer('Ошибка: связанное Web App не найдено. Возможно, оно было удалено.', show_alert=True)
+                session.close()
+                return
+            url = poll.web_app.url
             kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
 
         try:
@@ -247,43 +293,36 @@ async def private_chat_entry_point(update: Update, context: ContextTypes.DEFAULT
     loading_message = await update.effective_message.reply_text("🔎 Ищу чаты, где вы админ...")
 
     known_chats = db.get_known_chats()
-    if not known_chats:
-        logger.info(f"User {user_id} has no known chats to check.")
-        await loading_message.edit_text("Я не состою ни в каких чатах. Сначала добавьте меня в группу.")
-        return
-
-    logger.info(f"Found {len(known_chats)} known chats to check for user {user_id}.")
-
-    # Create a semaphore to limit concurrent requests to a reasonable number (e.g., 10)
-    # to avoid hitting Telegram's rate limits or causing pool timeouts.
-    semaphore = asyncio.Semaphore(10)
-
-    # Create concurrent tasks for all admin checks.
-    start_time = time.time()
-
-    tasks = [check_admin_in_chat(user_id, chat, context, semaphore) for chat in known_chats]
-    results = await asyncio.gather(*tasks, return_exceptions=True) # Use return_exceptions to prevent one failure from stopping all
-
-    duration = time.time() - start_time
-    logger.info(f"Admin checks for user {user_id} completed in {duration:.2f} seconds.")
-
-    # Filter out the None results and exceptions
-    admin_chats = [chat for chat in results if chat is not None and not isinstance(chat, Exception)]
-    failed_checks = [r for r in results if isinstance(r, Exception)]
     
-    if failed_checks:
-        logger.error(f"{len(failed_checks)} checks failed with exceptions during dashboard load for user {user_id}.")
+    admin_chats = []
+    if known_chats:
+        logger.info(f"Found {len(known_chats)} known chats to check for user {user_id}.")
+        semaphore = asyncio.Semaphore(10)
+        start_time = time.time()
+        tasks = [check_admin_in_chat(user_id, chat, context, semaphore) for chat in known_chats]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        duration = time.time() - start_time
+        logger.info(f"Admin checks for user {user_id} completed in {duration:.2f} seconds.")
+        admin_chats = [chat for chat in results if chat is not None and not isinstance(chat, Exception)]
+        failed_checks = [r for r in results if isinstance(r, Exception)]
+        if failed_checks:
+            logger.error(f"{len(failed_checks)} checks failed with exceptions during dashboard load for user {user_id}.")
 
+    kb = []
+    if admin_chats:
+        kb.extend([[InlineKeyboardButton(chat["title"], callback_data=f"dash:group:{chat['id']}")] for chat in admin_chats])
+    
+    if user_id == BOT_OWNER_ID:
+        kb.append([InlineKeyboardButton("⚙️ Панель администратора", callback_data="dash:admin_panel")])
 
-    # Edit the "Searching..." message with the final results.
-    if not admin_chats:
-        await loading_message.edit_text("Я не нашел групп, где вы являетесь администратором и я тоже.")
+    if not kb:
+        await loading_message.edit_text("Я не нашел групп, где вы являетесь администратором, или бот вообще не состоит в группах.")
         return
-
-    keyboard = [[InlineKeyboardButton(chat["title"], callback_data=f"dash:group:{chat['id']}")] for chat in admin_chats]
+        
+    text = 'Выберите чат для управления:' if admin_chats else 'Панель администратора:'
     await loading_message.edit_text(
-        'Выберите чат для управления:', 
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        text, 
+        reply_markup=InlineKeyboardMarkup(kb)
     )
 
 
@@ -474,7 +513,7 @@ async def delete_poll_execute(query: CallbackQuery, poll_id: int):
 
 def _get_webapp_management_menu(chat_id: int):
     """Builds the text and keyboard for the Web App management menu."""
-    web_apps = db.get_web_apps_for_chat(chat_id)
+    web_apps = db.get_web_apps(chat_id)
     kb = [[InlineKeyboardButton("➕ Добавить приложение", callback_data=f"dash:webapp_add_start:{chat_id}")]]
     
     if web_apps:
@@ -534,6 +573,27 @@ async def webapp_delete_execute(query: CallbackQuery, context: ContextTypes.DEFA
     await query.answer("Web App удалено.", show_alert=True)
     await private_chat_entry_point(update=query, context=context)
 
+async def show_admin_panel(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the admin panel with admin-only commands."""
+    text = "⚙️ *Панель администратора*\n\nЗдесь собраны команды для управления ботом."
+    kb = [
+        [InlineKeyboardButton("📤 Экспорт данных (JSON)", callback_data="dash:admin_export_json")],
+        [InlineKeyboardButton("📥 Инструкция по импорту (JSON)", callback_data="dash:admin_import_info")],
+        [InlineKeyboardButton("🔙 К выбору чата", callback_data='dash:back_to_chats')]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+
+async def admin_import_info(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
+    """Shows instructions for importing data."""
+    text = (
+        "📥 *Инструкция по импорту данных*\n\n"
+        "1\\. Отправьте в этот чат файл экспорта \\(`.json`\\)\\.\n"
+        "2\\. Ответьте на сообщение с файлом командой `/import_json`\\.\n\n"
+        "⚠️ *ВНИМАНИЕ\\!* Импорт полностью сотрет все текущие данные в базе\\."
+    )
+    kb = [[InlineKeyboardButton("🔙 Назад в админ-панель", callback_data="dash:admin_panel")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+
 async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Routes all callbacks starting with 'dash:'."""
     query = update.callback_query
@@ -564,11 +624,16 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
     elif command == "reopen_poll": await reopen_poll(query, context, int(params[0]))
     elif command == "wizard_start": await wizard_start(query, context, int(params[0]))
     elif command == "wizard_set_type": await wizard_set_type(query, context, params[0], int(params[1]))
-    elif command == "wizard_set_webapp": await wizard_set_webapp(query, context, int(params[0]))
+    elif command == "wizard_select_webapp": await wizard_select_webapp(query, context, int(params[0]))
     elif command == "webapp_menu": await show_webapp_management_menu(query, int(params[0]))
     elif command == "webapp_add_start": await webapp_add_start(query, context, int(params[0]))
     elif command == "webapp_delete_confirm": await webapp_delete_confirm(query, context, int(params[0]))
     elif command == "webapp_delete_execute": await webapp_delete_execute(query, context, int(params[0]))
+    elif command == "admin_panel": await show_admin_panel(query, context)
+    elif command == "admin_export_json":
+        await query.answer("Запускаю экспорт...")
+        await admin.export_json(update, context)
+    elif command == "admin_import_info": await admin_import_info(query, context)
 
     # Dummy handler for no-op callbacks
     elif command == "noop":
