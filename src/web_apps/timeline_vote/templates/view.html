@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Выбор ночевки</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+    <div id="app" class="app-container">
+        <div id="loader" class="loader">
+            <div class="spinner"></div>
+        </div>
+        <div id="content" class="hidden">
+            <h1 id="poll-title" class="poll-title"></h1>
+            <p class="subtitle">Выберите подходящий вариант участия</p>
+            
+            <div class="timeline-container">
+                <div class="timeline-header">
+                    <div>Пятница</div>
+                    <div>Суббота</div>
+                    <div>Воскресенье</div>
+                </div>
+                <div class="timeline-grid">
+                    <!-- Options will be injected here by JS -->
+                </div>
+            </div>
+
+            <div id="selection-info" class="selection-info">
+                <p>Ваш выбор: <strong id="selected-option-text"></strong></p>
+            </div>
+            
+            <button id="confirm-button" class="confirm-button" disabled>Подтвердить выбор</button>
+        </div>
+        <div id="error-view" class="error-view hidden">
+            <h2>😕 Ошибка</h2>
+            <p id="error-message"></p>
+        </div>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.expand();
+
+        const loader = document.getElementById('loader');
+        const content = document.getElementById('content');
+        const errorView = document.getElementById('error-view');
+        const errorMessage = document.getElementById('error-message');
+        const pollTitle = document.getElementById('poll-title');
+        const timelineGrid = document.querySelector('.timeline-grid');
+        const confirmButton = document.getElementById('confirm-button');
+        const selectionInfo = document.getElementById('selection-info');
+        const selectedOptionText = document.getElementById('selected-option-text');
+
+        let pollId = null;
+        let selectedOption = null;
+
+        const options = [
+            { id: 'fri-sat', text: '1 ночь (Пт-Сб)', gridColumn: '1 / 3' },
+            { id: 'sat-only', text: '1 день (Сб)', gridColumn: '2 / 3' },
+            { id: 'sat-sun', text: '1 ночь (Сб-Вс)', gridColumn: '2 / 4' },
+            { id: 'fri-sun', text: '2 ночи (Пт-Вс)', gridColumn: '1 / 4' }
+        ];
+
+        function renderOptions() {
+            timelineGrid.innerHTML = '';
+            options.forEach(opt => {
+                const optionEl = document.createElement('div');
+                optionEl.className = 'timeline-option';
+                optionEl.dataset.optionId = opt.id;
+                optionEl.dataset.optionText = opt.text;
+                optionEl.style.gridColumn = opt.gridColumn;
+                
+                const textEl = document.createElement('span');
+                textEl.textContent = opt.text;
+                optionEl.appendChild(textEl);
+
+                optionEl.addEventListener('click', () => handleOptionSelect(opt));
+                timelineGrid.appendChild(optionEl);
+            });
+        }
+
+        function handleOptionSelect(option) {
+            selectedOption = option;
+            
+            // Update visual state
+            document.querySelectorAll('.timeline-option').forEach(el => {
+                el.classList.remove('selected');
+                if (el.dataset.optionId === option.id) {
+                    el.classList.add('selected');
+                }
+            });
+
+            // Update info text and button
+            selectedOptionText.textContent = option.text;
+            selectionInfo.style.opacity = '1';
+            selectionInfo.style.transform = 'translateY(0)';
+            
+            confirmButton.disabled = false;
+            tg.MainButton.setText(`Подтвердить: ${option.text}`);
+            tg.MainButton.show();
+        }
+
+        function showError(message) {
+            loader.classList.add('hidden');
+            content.classList.add('hidden');
+            errorMessage.textContent = message;
+            errorView.classList.remove('hidden');
+        }
+
+        function main() {
+            renderOptions();
+            
+            try {
+                const urlParams = new URLSearchParams(window.location.hash.slice(1));
+                const initData = new URLSearchParams(tg.initData);
+
+                pollId = urlParams.get('poll_id');
+                const userId = initData.get('user') ? JSON.parse(initData.get('user')).id : null;
+
+                if (!pollId || !userId) {
+                    throw new Error("Не удалось получить ID опроса или пользователя. Попробуйте открыть снова из Telegram.");
+                }
+
+                // Fetch poll data from our API
+                fetch(`api/poll?poll_id=${pollId}&user_id=${userId}`)
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error(`Не удалось загрузить данные опроса (статус: ${response.status}).`);
+                        }
+                        return response.json();
+                    })
+                    .then(data => {
+                        pollTitle.textContent = data.title;
+                        
+                        // Pre-select user's previous vote
+                        if (data.user_vote) {
+                            const previouslyVotedOption = options.find(opt => opt.text === data.user_vote);
+                            if (previouslyVotedOption) {
+                                handleOptionSelect(previouslyVotedOption);
+                            }
+                        }
+
+                        loader.classList.add('hidden');
+                        content.classList.remove('hidden');
+                    })
+                    .catch(err => {
+                        console.error('Fetch error:', err);
+                        showError(err.message);
+                    });
+
+            } catch (e) {
+                console.error("Initialization error:", e);
+                showError(e.message);
+            }
+        }
+        
+        confirmButton.addEventListener('click', () => {
+            if (selectedOption) {
+                const dataToSend = JSON.stringify({
+                    poll_id: pollId,
+                    response: selectedOption.text
+                });
+                tg.sendData(dataToSend);
+            }
+        });
+
+        tg.onEvent('mainButtonClicked', function() {
+             if (selectedOption) {
+                const dataToSend = JSON.stringify({
+                    poll_id: pollId,
+                    response: selectedOption.text
+                });
+                tg.sendData(dataToSend);
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', main);
+    </script>
+</body>
+</html> 
