@@ -9,7 +9,7 @@ from starlette.templating import Jinja2Templates
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, TypeHandler
 from telegram import Update
 
-from src.config import BOT_TOKEN, logger, WEB_URL
+from src.config import BOT_TOKEN, logger, WEB_URL, DEV_MODE
 from src.database import init_database, get_poll
 from src.handlers import admin, dashboard, voting, text, results, misc, base, settings
 
@@ -38,17 +38,15 @@ application.add_error_handler(base.error_handler)
 # --- Lifespan and Starlette Server Setup ---
 @asynccontextmanager
 async def lifespan(app: Starlette):
-    """Handles bot startup and shutdown when the server starts and stops."""
-    logger.info("Server starting up...")
+    """Handles bot startup and shutdown."""
     init_database()
+    await application.initialize()
     await application.bot.set_webhook(url=f"{WEB_URL}/telegram", allowed_updates=Update.ALL_TYPES)
-    async with application:
-        await application.start()
-        logger.info("Bot started.")
-        yield
-        logger.info("Server shutting down...")
-        await application.stop()
-        logger.info("Bot stopped.")
+    logger.info("Bot initialized and webhook set.")
+    yield
+    logger.info("Server shutting down...")
+    await application.shutdown()
+    logger.info("Bot shut down.")
 
 templates = Jinja2Templates(directory="templates")
 
@@ -74,8 +72,10 @@ async def vote_page(request: Request):
     return templates.TemplateResponse("vote.html", context)
 
 async def telegram_webhook(request: Request) -> JSONResponse:
-    """Handles incoming Telegram updates by passing them to the application."""
-    await application.update_queue.put(Update.de_json(data=await request.json(), bot=application.bot))
+    """Handles incoming Telegram updates by passing them to the application for direct processing."""
+    update_data = await request.json()
+    update = Update.de_json(data=update_data, bot=application.bot)
+    await application.process_update(update)
     return JSONResponse({"ok": True})
 
 routes = [
@@ -86,4 +86,23 @@ routes = [
 
 server = Starlette(routes=routes, lifespan=lifespan)
 
-# No need for a __main__ block anymore, gunicorn handles the launch. 
+# No need for a __main__ block anymore, gunicorn handles the launch.
+async def main() -> None:
+    """Starts the bot in polling mode for local development."""
+    logger.info("Running in development mode (polling)...")
+    init_database()
+    
+    # Remove any existing webhook
+    logger.info("Deleting webhook...")
+    await application.bot.delete_webhook()
+    
+    # Start polling
+    logger.info("Starting polling...")
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    if DEV_MODE:
+        asyncio.run(main())
+    else:
+        logger.warning("Running in production mode. This script should be run by an ASGI server like Gunicorn, not directly.") 

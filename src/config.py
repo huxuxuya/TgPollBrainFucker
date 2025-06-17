@@ -15,10 +15,13 @@ except KeyError:
 # The previous logic of setting it on the first use of /backup is fragile.
 BOT_OWNER_ID = int(os.environ.get('BOT_OWNER_ID', 0))
 
+# Development mode switch. Set to "true" or "1" for local polling.
+DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() in ('true', '1')
+
 # URL for the web app, required for webhook setup
 WEB_URL = os.environ.get('WEB_URL')
-if not WEB_URL:
-    raise RuntimeError('Environment variable WEB_URL is not set!')
+if not DEV_MODE and not WEB_URL:
+    raise RuntimeError('Environment variable WEB_URL is not set while not in DEV_MODE!')
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///poll_data.db")
 DATABASE_PATH = DATABASE_URL.split("///")[-1] if DATABASE_URL.startswith("sqlite:///") else "poll_data.db"
