@@ -33,7 +33,6 @@ async def export_json(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "known_chats": [model_to_dict(kc) for kc in session.query(db.KnownChat).all()],
             "participants": [model_to_dict(p) for p in session.query(db.Participant).all()],
             "polls": [model_to_dict(p) for p in session.query(db.Poll).all()],
-            "web_apps": [model_to_dict(wa) for wa in session.query(db.WebApp).all()],
             "responses": [model_to_dict(r) for r in session.query(db.Response).all()],
             "poll_settings": [model_to_dict(ps) for ps in session.query(db.PollSetting).all()],
             "poll_option_settings": [model_to_dict(pos) for pos in session.query(db.PollOptionSetting).all()],
@@ -90,7 +89,7 @@ async def import_json(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     session = db.SessionLocal()
     MODELS_IN_ORDER = [
-        db.User, db.KnownChat, db.Participant, db.WebApp, db.Poll,
+        db.User, db.KnownChat, db.Participant, db.Poll,
         db.Response, db.PollSetting, db.PollOptionSetting
     ]
 

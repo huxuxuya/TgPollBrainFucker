@@ -1,6 +1,6 @@
 import os
 import logging
-from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Boolean, Float, Text, PrimaryKeyConstraint, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Boolean, Float, Text, PrimaryKeyConstraint, ForeignKey, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from typing import Union, List
@@ -99,15 +99,53 @@ def init_database():
     try:
         Base.metadata.create_all(engine)
         logger.info("Database initialized with required tables.")
+        run_migrations()
     except Exception as e:
         logger.error(f"Error initializing database: {e}")
         raise
 
 
-def run_migration():
-    """Запуск миграции базы данных, если требуется"""
-    # Здесь можно добавить миграцию данных, если нужно
-    pass
+def run_migrations():
+    """
+    Runs simple, idempotent migrations.
+    This is a basic alternative to a full migration tool like Alembic.
+    """
+    logger.info("Running simple database migrations check...")
+
+    try:
+        inspector = inspect(engine)
+
+        # --- Migration 1: Add web_app_id to polls table ---
+        polls_columns = [c['name'] for c in inspector.get_columns('polls')]
+        if 'web_app_id' not in polls_columns:
+            logger.info("MIGRATION: 'web_app_id' column not found in 'polls' table. Adding it.")
+            try:
+                with engine.connect() as connection:
+                    # Use VARCHAR without a length for PostgreSQL, which maps to `text`.
+                    # For SQLite, it will also work.
+                    connection.execute(text('ALTER TABLE polls ADD COLUMN web_app_id VARCHAR'))
+                    # For SQLAlchemy 2.0 style with Connection, commit is often needed for DDL
+                    if connection.engine.dialect.name != 'sqlite':
+                        connection.commit()
+                logger.info("MIGRATION: Successfully added 'web_app_id' column.")
+            except Exception as e:
+                logger.error(f"MIGRATION FAILED for 'web_app_id': {e}")
+
+        # --- Migration 2: Remove the now-obsolete web_apps table ---
+        if inspector.has_table("web_apps"):
+            logger.info("MIGRATION: Obsolete 'web_apps' table found. Removing it.")
+            try:
+                with engine.connect() as connection:
+                    connection.execute(text('DROP TABLE web_apps'))
+                    if connection.engine.dialect.name != 'sqlite':
+                        connection.commit()
+                logger.info("MIGRATION: Successfully dropped 'web_apps' table.")
+            except Exception as e:
+                logger.error(f"MIGRATION FAILED for dropping 'web_apps' table: {e}")
+
+        logger.info("Migrations check finished.")
+    except Exception as e:
+        logger.error(f"An error occurred during the migration process: {e}", exc_info=True)
 
 
 def update_user(session: Session, user_id: int, first_name: str, last_name: str, username: str = None):
