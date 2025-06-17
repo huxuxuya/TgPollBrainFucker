@@ -89,8 +89,13 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
         if not poll or poll.status != 'draft':
             await query.answer('Опрос не является черновиком или не найден.', show_alert=True)
             return
-        if not poll.message or not poll.options:
-            await query.answer('Текст или варианты опроса не заданы.', show_alert=True)
+
+        # More specific checks for poll validity
+        if not poll.message:
+            await query.answer('Текст (заголовок) опроса не задан. Отредактируйте его в настройках.', show_alert=True)
+            return
+        if poll.poll_type == 'native' and (not poll.options or not all(opt.strip() for opt in poll.options.split(','))):
+            await query.answer('Ошибка: опрос должен содержать корректные варианты ответов. Отредактируйте их в настройках.', show_alert=True)
             return
 
         initial_text = generate_poll_text(poll=poll, session=session)
@@ -98,6 +103,11 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
         kb = []
         if poll.poll_type == 'native':
             options = poll.options.split(',')
+            # Prevent starting polls with empty button text, which causes an API error.
+            if not all(opt.strip() for opt in options):
+                await query.answer('Ошибка: опрос содержит пустые варианты ответов. Пожалуйста, отредактируйте их в настройках.', show_alert=True)
+                session.close()
+                return
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
         elif poll.poll_type == 'webapp':
             if not poll.web_app_id:

@@ -27,8 +27,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Route to the appropriate handler
     if state.startswith('waiting_for_poll_'):
         await _handle_poll_creation(update, context)
-    elif state.startswith('waiting_for_webapp_'):
-        await _handle_webapp_creation(update, context)
     elif state == 'waiting_for_poll_setting' or state == 'waiting_for_option_setting':
         await _handle_settings_update(update, context)
     else:
@@ -40,7 +38,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _handle_poll_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles text input during the poll creation wizard."""
     state = context.user_data.get('wizard_state')
-    text_input = update.message.text
+    text_input = update.message.text.strip()
     app_user_data = context.user_data
     
     message_to_edit = app_user_data.get('message_to_edit')
@@ -51,19 +49,65 @@ async def _handle_poll_creation(update: Update, context: ContextTypes.DEFAULT_TY
 
     if state == 'waiting_for_poll_title':
         app_user_data['wizard_title'] = text_input
-        app_user_data['wizard_state'] = 'waiting_for_poll_options'
-        prompt = "Отлично. Теперь отправьте варианты ответа, каждый на новой строке. Когда закончите, нажмите /done."
-        await context.bot.edit_message_text(prompt, chat_id=update.effective_chat.id, message_id=message_to_edit)
+        poll_type = app_user_data.get('wizard_poll_type')
+        
+        # For WebApp polls, we have all the info we need after the title.
+        # Create the poll draft immediately.
+        if poll_type == 'webapp':
+            chat_id = app_user_data.get('wizard_chat_id')
+            title = app_user_data.get('wizard_title')
+            web_app_id = app_user_data.get('wizard_web_app_id')
+
+            if not all([chat_id, title, web_app_id]):
+                logger.error(f"Cannot create webapp poll, context is missing data: {app_user_data}")
+                _clean_wizard_context(context)
+                await context.bot.edit_message_text(
+                    "Произошла ошибка, не вся информация для создания web-опроса была найдена. Мастер отменен.", 
+                    chat_id=update.effective_chat.id, 
+                    message_id=message_to_edit
+                )
+                return
+            
+            # WebApp polls don't need options defined in the bot DB.
+            # We use a placeholder to pass the validation checks.
+            new_poll = db.Poll(
+                chat_id=chat_id,
+                message=title,
+                status='draft',
+                options='Web App Poll', # Placeholder, not shown to user
+                poll_type='webapp',
+                web_app_id=web_app_id
+            )
+            new_poll_id = db.add_poll(new_poll)
+            
+            await results.show_draft_poll_menu(
+                context=context,
+                poll_id=new_poll_id,
+                chat_id=update.effective_chat.id,
+                message_id=message_to_edit
+            )
+            _clean_wizard_context(context)
+
+        else: # For 'native' polls, ask for options
+            app_user_data['wizard_state'] = 'waiting_for_poll_options'
+            prompt = "Отлично. Теперь отправьте варианты ответа, каждый на новой строке. Когда закончите, нажмите /done."
+            await context.bot.edit_message_text(prompt, chat_id=update.effective_chat.id, message_id=message_to_edit)
 
     elif state == 'waiting_for_poll_options':
         if 'wizard_options' not in app_user_data:
             app_user_data['wizard_options'] = []
         options = app_user_data['wizard_options']
-        options.append(text_input)
         
+        prompt_addition = ""
+        if text_input:
+            options.append(text_input)
+            prompt_addition = "Отлично. Добавлен вариант."
+        else:
+            prompt_addition = "Пустой вариант ответа не был добавлен."
+
         # Give feedback by updating the message
         current_options_text = "\n".join([f"▫️ {opt}" for opt in options])
-        prompt = f"Отлично. Добавлен вариант. \n\n*Текущие варианты:*\n{current_options_text}\n\nПродолжайте добавлять или нажмите /done."
+        prompt = f"{prompt_addition}\n\n*Текущие варианты:*\n{current_options_text}\n\nПродолжайте добавлять или нажмите /done."
         await context.bot.edit_message_text(prompt, chat_id=update.effective_chat.id, message_id=message_to_edit, parse_mode='MarkdownV2')
 
 
@@ -160,8 +204,11 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     app_user_data = context.user_data
     state = app_user_data.get('wizard_state')
     
-    if not (state and state == 'waiting_for_poll_options'):
-        await update.message.reply_text("Нет активного процесса создания опроса.", quote=False)
+    # This command is now only for 'native' polls, so this check is more specific.
+    if not (state and state == 'waiting_for_poll_options' and app_user_data.get('wizard_poll_type') == 'native'):
+        # Silently ignore if it's not a native poll wizard
+        if 'wizard_state' in app_user_data:
+            logger.warning(f"'/done' called in an unexpected state '{state}' or for non-native poll. Ignoring.")
         return
         
     try:
@@ -169,7 +216,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass # Ignore if already deleted
 
-    poll_type = app_user_data.get('wizard_poll_type', 'native')
+    poll_type = app_user_data.get('wizard_poll_type')
     chat_id = app_user_data.get('wizard_chat_id')
     title = app_user_data.get('wizard_title')
     message_to_edit = app_user_data.get('message_to_edit')
@@ -187,23 +234,25 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     options = app_user_data.get('wizard_options', [])
     if not options:
         await context.bot.edit_message_text("Вы не добавили ни одного варианта. Мастер отменен.", chat_id=chat_id, message_id=message_to_edit)
-    else:
-        new_poll = db.Poll(
-            chat_id=chat_id, 
-            message=title, 
-            status='draft', 
-            options=','.join(options), 
-            poll_type=poll_type,
-            web_app_id=app_user_data.get('wizard_web_app_id')
-        )
-        new_poll_id = db.add_poll(new_poll)
-        
-        # Instead of showing text, show the management menu
-        await results.show_draft_poll_menu(
-            context=context,
-            poll_id=new_poll_id,
-            chat_id=chat_id,
-            message_id=message_to_edit
-        )
+        _clean_wizard_context(context)
+        return
+
+    new_poll = db.Poll(
+        chat_id=chat_id, 
+        message=title, 
+        status='draft', 
+        options=','.join(options), 
+        poll_type=poll_type,
+        web_app_id=app_user_data.get('wizard_web_app_id') # Will be None, which is fine
+    )
+    new_poll_id = db.add_poll(new_poll)
+    
+    # Instead of showing text, show the management menu
+    await results.show_draft_poll_menu(
+        context=context,
+        poll_id=new_poll_id,
+        chat_id=chat_id,
+        message_id=message_to_edit
+    )
 
     _clean_wizard_context(context) 
