@@ -131,7 +131,8 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
             kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
 
         # Final debug logging before sending
-        logger.info(f"[DEBUG_START_POLL] Final text being sent: '{initial_text.replace('\n', ' ')}'")
+        log_text = initial_text.replace('\n', ' ')
+        logger.info(f"[DEBUG_START_POLL] Final text being sent: '{log_text}'")
         logger.info(f"[DEBUG_START_POLL] Keyboard object: {kb}")
         
         try:
