@@ -127,10 +127,8 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
                 await query.answer('Ошибка: для этого опроса не задан ID веб-приложения.', show_alert=True)
                 return
             url = f"{WEB_URL}/web_apps/{poll.web_app_id}/?poll_id={poll.poll_id}"
-            kb = [
-                [InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))],
-                [InlineKeyboardButton("🔄 Обновить", callback_data=f"results:refresh:{poll.poll_id}")]
-            ]
+            # A keyboard with a WebApp button cannot be mixed with other button types.
+            kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
 
         # Final debug logging before sending
         logger.info(f"[DEBUG_START_POLL] Final text being sent: '{initial_text.replace('\n', ' ')}'")
