@@ -38,17 +38,21 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
         if poll_id is None:
             poll_id = poll.poll_id
 
-        message, options_str = poll.message, poll.options
-        original_options = [opt.strip() for opt in options_str.split(',')]
+        message = poll.message
+        responses = db.get_responses(poll_id)
         
-        responses = db.get_responses(poll_id) # This function is session-independent.
-        
-        # --- DEBUG LOGGING ---
-        raw_responses_log = [f"(User: {r.user_id}, Vote: '{r.response}')" for r in responses]
-        logger.info(f"[DEBUG_DISPLAY] Generating text for poll {poll_id}. Raw responses from DB: {raw_responses_log}")
-        # --- END DEBUG LOGGING ---
+        # --- Determine the options to display ---
+        # For native polls, use the pre-defined options.
+        # For webapp polls, dynamically discover options from what users have actually voted for.
+        display_options = []
+        if poll.poll_type == 'native':
+            display_options = [opt.strip() for opt in poll.options.split(',')]
+        else: # For 'webapp' and other potential future types
+            if responses:
+                # Get unique responses, preserving order of first appearance
+                display_options = list(dict.fromkeys(r.response.strip() for r in responses))
 
-        votes_by_option = {opt.strip(): [] for opt in original_options}
+        votes_by_option = {opt: [] for opt in display_options}
         user_votes = {} # To track which option a user voted for
 
         for r in responses:
@@ -58,17 +62,17 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
                 votes_by_option[cleaned_response].append(r.user_id)
             user_votes[r.user_id] = cleaned_response
 
-        counts = {opt: 0 for opt in original_options}
+        counts = {opt: 0 for opt in display_options}
         for resp in responses:
             if resp.response in counts: counts[resp.response] += 1
             
         poll_setting = db.get_poll_setting(poll_id)
+        # For webapp polls, we don't have per-option settings from the DB,
+        # so we rely only on the poll-wide defaults.
         default_show_names = poll_setting.default_show_names if poll_setting else 1
-        target_sum = poll_setting.target_sum if poll_setting else 0
         default_show_count = poll_setting.default_show_count if poll_setting else 1
-        
+
         total_votes = len(responses)
-        total_collected = 0
         text_parts = [escape_markdown(message, version=2), ""]
 
         # Add a clear 'closed' status if applicable
@@ -76,55 +80,76 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
             text_parts.insert(0, "*ОПРОС ЗАВЕРШЕН*")
             text_parts.insert(1, "\\-\\-\\-") # Separator
 
-        options_with_settings = []
-        for i, option_text in enumerate(original_options):
-            opt_setting = db.get_poll_option_setting(poll_id, i)
-            options_with_settings.append({
-                'text': option_text,
-                'show_names': opt_setting.show_names if opt_setting and opt_setting.show_names is not None else default_show_names,
-                'names_style': opt_setting.names_style if opt_setting and opt_setting.names_style else 'list',
-                'is_priority': opt_setting.is_priority if opt_setting else 0,
-                'contribution_amount': opt_setting.contribution_amount if opt_setting else 0,
-                'emoji': (opt_setting.emoji + ' ') if opt_setting and opt_setting.emoji else "",
-                'show_count': opt_setting.show_count if opt_setting and opt_setting.show_count is not None else default_show_count,
-                'show_contribution': opt_setting.show_contribution if opt_setting and opt_setting.show_contribution is not None else 1,
-            })
+        # For webapp polls, there are no saved settings per option, so we just iterate through
+        # the dynamically found options.
+        if poll.poll_type == 'webapp':
+            for option_text in display_options:
+                count = counts.get(option_text, 0)
+                escaped_option_text = escape_markdown(option_text, version=2)
+                line = f"{escaped_option_text}: *{count}*"
+                text_parts.append(line)
 
-        options_with_settings.sort(key=lambda x: x['is_priority'], reverse=True)
+                if default_show_names and count > 0:
+                    user_ids_for_option = votes_by_option.get(option_text, [])
+                    user_names = [db.get_user_name(session, uid, markdown_link=True) for uid in user_ids_for_option]
+                    names_list = [f"▫️ {name}" for name in user_names]
+                    text_parts.append("\n".join(f"    {name}" for name in names_list))
+                text_parts.append("")
 
-        for option_data in options_with_settings:
-            option_text = option_data['text']
-            count = counts.get(option_text, 0)
-            contribution = option_data['contribution_amount']
-            if contribution > 0: total_collected += count * contribution
-                
-            marker = "⭐ " if option_data['is_priority'] else ""
-            escaped_option_text = escape_markdown(option_text, version=2)
-            formatted_text = f"*{escaped_option_text}*" if option_data['is_priority'] else escaped_option_text
-            line = f"{marker}{formatted_text}"
-            if contribution > 0 and option_data['show_contribution']:
-                line += f" \\(по {int(contribution)}\\)"
-            if option_data['show_count']:
-                line += f": *{count}*"
-            text_parts.append(line)
+        else: # Native poll display logic
+            options_with_settings = []
+            original_options = [opt.strip() for opt in poll.options.split(',')]
+            for i, option_text in enumerate(original_options):
+                opt_setting = db.get_poll_option_setting(poll_id, i)
+                options_with_settings.append({
+                    'text': option_text,
+                    'show_names': opt_setting.show_names if opt_setting and opt_setting.show_names is not None else default_show_names,
+                    'names_style': opt_setting.names_style if opt_setting and opt_setting.names_style else 'list',
+                    'is_priority': opt_setting.is_priority if opt_setting else 0,
+                    'contribution_amount': opt_setting.contribution_amount if opt_setting else 0,
+                    'emoji': (opt_setting.emoji + ' ') if opt_setting and opt_setting.emoji else "",
+                    'show_count': opt_setting.show_count if opt_setting and opt_setting.show_count is not None else default_show_count,
+                    'show_contribution': opt_setting.show_contribution if opt_setting and opt_setting.show_contribution is not None else 1,
+                })
 
-            if option_data['show_names'] and count > 0:
-                user_ids_for_option = votes_by_option.get(option_text, [])
-                user_names = [db.get_user_name(session, uid, markdown_link=True) for uid in user_ids_for_option]
-                logger.info(f"[DEBUG] User names for option '{option_text}' in poll {poll_id}: {user_names}")
-                names_list = [f"{option_data['emoji']}{name}" for name in user_names]
-                indent = "    "
-                if option_data['names_style'] == 'list': text_parts.append("\n".join(f"{indent}{name}" for name in names_list))
-                elif option_data['names_style'] == 'inline': text_parts.append(f'{indent}{", ".join(names_list)}')
-                elif option_data['names_style'] == 'numbered': text_parts.append("\n".join(f"{indent}{i}\\. {name}" for i, name in enumerate(names_list, 1)))
-            text_parts.append("")
+            options_with_settings.sort(key=lambda x: x['is_priority'], reverse=True)
 
-        if target_sum > 0:
-            bar, percent = get_progress_bar(total_collected, target_sum)
-            formatted_percent = f"{percent:.1f}".replace('.', '\\.')
-            text_parts.append(f"💰 Собрано: *{int(total_collected)} из {int(target_sum)}* \\({formatted_percent}%\\)\n{bar}")
-        elif total_collected > 0:
-            text_parts.append(f"💰 Собрано: *{int(total_collected)}*")
+            total_collected = 0 # Specific to native polls with contributions
+            target_sum = poll_setting.target_sum if poll_setting else 0
+
+            for option_data in options_with_settings:
+                option_text = option_data['text']
+                count = counts.get(option_text, 0)
+                contribution = option_data['contribution_amount']
+                if contribution > 0: total_collected += count * contribution
+                    
+                marker = "⭐ " if option_data['is_priority'] else ""
+                escaped_option_text = escape_markdown(option_text, version=2)
+                formatted_text = f"*{escaped_option_text}*" if option_data['is_priority'] else escaped_option_text
+                line = f"{marker}{formatted_text}"
+                if contribution > 0 and option_data['show_contribution']:
+                    line += f" \\(по {int(contribution)}\\)"
+                if option_data['show_count']:
+                    line += f": *{count}*"
+                text_parts.append(line)
+
+                if option_data['show_names'] and count > 0:
+                    user_ids_for_option = votes_by_option.get(option_text, [])
+                    user_names = [db.get_user_name(session, uid, markdown_link=True) for uid in user_ids_for_option]
+                    logger.info(f"[DEBUG] User names for option '{option_text}' in poll {poll_id}: {user_names}")
+                    names_list = [f"{option_data['emoji']}{name}" for name in user_names]
+                    indent = "    "
+                    if option_data['names_style'] == 'list': text_parts.append("\n".join(f"{indent}{name}" for name in names_list))
+                    elif option_data['names_style'] == 'inline': text_parts.append(f'{indent}{", ".join(names_list)}')
+                    elif option_data['names_style'] == 'numbered': text_parts.append("\n".join(f"{indent}{i}\\. {name}" for i, name in enumerate(names_list, 1)))
+                text_parts.append("")
+
+            if target_sum > 0:
+                bar, percent = get_progress_bar(total_collected, target_sum)
+                formatted_percent = f"{percent:.1f}".replace('.', '\\.')
+                text_parts.append(f"💰 Собрано: *{int(total_collected)} из {int(target_sum)}* \\({formatted_percent}%\\)\n{bar}")
+            elif total_collected > 0:
+                text_parts.append(f"💰 Собрано: *{int(total_collected)}*")
         
         while text_parts and text_parts[-1] == "": text_parts.pop()
         text_parts.append(f"\nВсего проголосовало: *{total_votes}*")

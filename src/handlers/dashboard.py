@@ -103,16 +103,14 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
         kb = []
         if poll.poll_type == 'native':
             options = poll.options.split(',')
-            # Prevent starting polls with empty button text, which causes an API error.
-            if not all(opt.strip() for opt in options):
+            # Final validation right before creating buttons to prevent API errors.
+            if any(not opt.strip() for opt in options):
                 await query.answer('Ошибка: опрос содержит пустые варианты ответов. Пожалуйста, отредактируйте их в настройках.', show_alert=True)
-                session.close()
                 return
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
         elif poll.poll_type == 'webapp':
             if not poll.web_app_id:
                 await query.answer('Ошибка: для этого опроса не задан ID веб-приложения.', show_alert=True)
-                session.close()
                 return
             url = f"{WEB_URL}/web_apps/{poll.web_app_id}/?poll_id={poll.poll_id}"
             kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
