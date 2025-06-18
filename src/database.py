@@ -70,11 +70,12 @@ class Response(Base):
     __tablename__ = 'responses'
     poll_id = Column(Integer, ForeignKey('polls.poll_id'), primary_key=True)
     user_id = Column(BigInteger, primary_key=True)
-    response = Column(Text)
+    response = Column(Text, primary_key=True)
 
 class PollSetting(Base):
     __tablename__ = 'poll_settings'
     poll_id = Column(Integer, primary_key=True)
+    allow_multiple_answers = Column(Boolean, default=False, nullable=False)
     default_show_names = Column(Integer, default=1)
     default_names_style = Column(String, default='list')
     target_sum = Column(Float, default=0)
@@ -160,7 +161,7 @@ def update_user(session: Session, user_id: int, first_name: str, last_name: str,
         session.add(user)
 
 def add_or_update_response(poll_id: int, user_id: int, first_name: str, last_name: str, username: str, option_index: int = None, option_text: str = None):
-    """Adds or updates a user's response to a poll."""
+    """Adds or updates a user's response to a poll, handling single and multiple choice."""
     session = SessionLocal()
     try:
         # First, ensure the user exists in the main Users table
@@ -168,9 +169,13 @@ def add_or_update_response(poll_id: int, user_id: int, first_name: str, last_nam
         if not user:
             user = User(user_id=user_id, first_name=first_name, last_name=last_name, username=username)
             session.add(user)
-            # We don't commit here, we let the response addition commit everything
+        else: # Update user's name if it has changed
+            user.first_name = first_name
+            user.last_name = last_name
+            user.username = username
         
         poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+        poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
         if not poll:
             logger.error(f"Poll with ID {poll_id} not found, can't add response.")
             return
@@ -190,12 +195,24 @@ def add_or_update_response(poll_id: int, user_id: int, first_name: str, last_nam
             logger.error("Either option_index or option_text must be provided.")
             return
 
-        response = session.query(Response).filter_by(poll_id=poll_id, user_id=user_id).first()
-        if response:
-            response.response = response_value
+        allow_multiple = poll_setting.allow_multiple_answers if poll_setting else False
+
+        if allow_multiple:
+            # For multiple choice, check if this specific response exists and toggle it
+            response = session.query(Response).filter_by(poll_id=poll_id, user_id=user_id, response=response_value).first()
+            if response:
+                # User is un-voting for this option
+                session.delete(response)
+            else:
+                # User is voting for a new option
+                new_response = Response(poll_id=poll_id, user_id=user_id, response=response_value)
+                session.add(new_response)
         else:
-            response = Response(poll_id=poll_id, user_id=user_id, response=response_value)
-            session.add(response)
+            # For single choice, remove all previous responses for this user in this poll
+            session.query(Response).filter_by(poll_id=poll_id, user_id=user_id).delete()
+            # And add the new one
+            new_response = Response(poll_id=poll_id, user_id=user_id, response=response_value)
+            session.add(new_response)
         
         session.commit()
     finally:

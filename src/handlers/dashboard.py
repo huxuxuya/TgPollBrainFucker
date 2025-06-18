@@ -32,13 +32,28 @@ async def wizard_set_type(query: CallbackQuery, context: ContextTypes.DEFAULT_TY
     context.user_data['wizard_poll_type'] = poll_type
     
     if poll_type == 'native':
-        context.user_data['wizard_state'] = 'waiting_for_poll_title'
+        # Ask about multiple answers
+        keyboard = [
+            [InlineKeyboardButton("Да (несколько вариантов)", callback_data=f"dash:wizard_set_multiple:yes:{chat_id}")],
+            [InlineKeyboardButton("Нет (один вариант)", callback_data=f"dash:wizard_set_multiple:no:{chat_id}")],
+            [InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]
+        ]
         await query.edit_message_text(
-            "Введите название (заголовок) для вашего опроса.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]])
+            "Разрешить выбор нескольких вариантов ответа?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
     elif poll_type == 'webapp':
+        context.user_data['wizard_allow_multiple'] = False # Webapps handle this internally
         await wizard_show_webapp_selection(query, context, chat_id)
+
+async def wizard_set_multiple(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, allow_multiple: str, chat_id: int):
+    """Sets the multiple answers option and asks for the poll title."""
+    context.user_data['wizard_allow_multiple'] = (allow_multiple == 'yes')
+    context.user_data['wizard_state'] = 'waiting_for_poll_title'
+    await query.edit_message_text(
+        "Введите название (заголовок) для вашего опроса.",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]])
+    )
 
 async def wizard_show_webapp_selection(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     """Shows a list of available bundled web apps to attach to the poll."""
@@ -593,6 +608,7 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
     elif command == "reopen_poll": await reopen_poll(query, context, int(params[0]))
     elif command == "wizard_start": await wizard_start(query, context, int(params[0]))
     elif command == "wizard_set_type": await wizard_set_type(query, context, params[0], int(params[1]))
+    elif command == "wizard_set_multiple": await wizard_set_multiple(query, context, params[0], int(params[1]))
     elif command == "wizard_select_webapp": await wizard_select_webapp(query, context, params[0])
     elif command == "admin_panel": await show_admin_panel(query, context)
     elif command == "admin_export_json":

@@ -95,14 +95,19 @@ async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: Co
         if query: await query.answer("Опрос не найден.", show_alert=True)
         return
 
+    poll_setting = db.get_poll_setting(poll_id, create=True)
+    multiple_answers = poll_setting.allow_multiple_answers
+
     title = poll.message or f"Опрос {poll.poll_id}"
-    text = f"⚙️ *Общие настройки опроса: «{title}»*"
+    text = f"⚙️ *Общие настройки опроса: «{title}»*\n\n" \
+           f"Несколько ответов: {'Да' if multiple_answers else 'Нет'}"
 
     kb = [
         [
             InlineKeyboardButton("📝 Заголовок", callback_data=f"settings:ask_text:{poll_id}:message"),
             InlineKeyboardButton("📝 Варианты", callback_data=f"settings:ask_text:{poll_id}:options")
         ],
+        [InlineKeyboardButton(f"Несколько ответов: {'✅' if multiple_answers else '❌'}", callback_data=f"settings:toggle_setting:{poll_id}:allow_multiple_answers")],
         [InlineKeyboardButton("⚙️ Настроить варианты ответов", callback_data=f"settings:poll_options_menu:{poll_id}")],
         [InlineKeyboardButton("📢 Эмодзи для напоминаний", callback_data=f"settings:ask_text:{poll_id}:nudge_negative_emoji")],
         [InlineKeyboardButton("↩️ К результатам/списку", callback_data=f"results:show:{poll.poll_id}")]
@@ -229,11 +234,22 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         await text_input_for_setting(query, context, poll_id, parts[3])
     elif command == "ask_option_text":
         await text_input_for_option_setting(query, context, poll_id, int(parts[3]), parts[4])
+    elif command == "toggle_setting":
+        setting_key = parts[3]
+        toggle_boolean_setting(poll_id, setting_key)
+        await show_poll_settings_menu(query, context, poll_id)
     elif command == "toggle_option_setting":
         option_index = int(parts[3])
         setting_key = parts[4]
         toggle_boolean_option_setting(poll_id, option_index, setting_key)
         await show_single_option_settings_menu(query, context, poll_id, option_index)
+
+def toggle_boolean_setting(poll_id: int, setting_key: str):
+    """Toggles a boolean setting for a poll."""
+    setting = db.get_poll_setting(poll_id, create=True)
+    current_value = getattr(setting, setting_key, False)
+    setattr(setting, setting_key, not current_value)
+    db.commit_session()
 
 def toggle_boolean_option_setting(poll_id: int, option_index: int, setting_key: str):
     """Toggles a boolean setting for a specific poll option."""

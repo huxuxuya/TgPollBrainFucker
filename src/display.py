@@ -56,14 +56,15 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
                     display_options.append(opt)
 
         votes_by_option = {opt: [] for opt in display_options}
-        user_votes = {} # To track which option a user voted for
+        # This now stores a list of responses for each user.
+        user_votes = {r.user_id: [] for r in responses}
 
         for r in responses:
             # Normalize the response from DB to match a clean option from the poll
             cleaned_response = r.response.strip()
             if cleaned_response in votes_by_option:
                 votes_by_option[cleaned_response].append(r.user_id)
-            user_votes[r.user_id] = cleaned_response
+            user_votes[r.user_id].append(cleaned_response)
 
         counts = {opt: 0 for opt in display_options}
         for resp in responses:
@@ -75,7 +76,8 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
         default_show_names = poll_setting.default_show_names if poll_setting else 1
         default_show_count = poll_setting.default_show_count if poll_setting else 1
 
-        total_votes = len(responses)
+        # In multiple choice polls, the number of voters is unique users, not total responses.
+        total_voters = len(user_votes)
         text_parts = [escape_markdown(message, version=2), ""]
 
         # Add a clear 'closed' status if applicable
@@ -85,7 +87,7 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
 
         # For webapp polls, if there are no votes yet, don't show the options list.
         # This avoids a Telegram API conflict on the initial message send.
-        if poll.poll_type == 'webapp' and total_votes == 0:
+        if poll.poll_type == 'webapp' and not user_votes:
             # The text will just be the title and the total votes (0).
             pass
         # For webapp polls WITH votes, or for all native polls:
@@ -159,7 +161,9 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
                 text_parts.append(f"💰 Собрано: *{int(total_collected)}*")
         
         while text_parts and text_parts[-1] == "": text_parts.pop()
-        text_parts.append(f"\nВсего проголосовало: *{total_votes}*")
+        
+        # Display the number of unique voters.
+        text_parts.append(f"\nВсего проголосовало: *{total_voters}*")
         final_text = "\n".join(text_parts)
         
         # We only commit if we created the session inside this function.
