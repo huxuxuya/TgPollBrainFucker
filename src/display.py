@@ -73,8 +73,8 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
         poll_setting = db.get_poll_setting(poll_id)
         # For webapp polls, we don't have per-option settings from the DB,
         # so we rely only on the poll-wide defaults.
-        default_show_names = poll_setting.default_show_names if poll_setting else 1
-        default_show_count = poll_setting.default_show_count if poll_setting else 1
+        default_show_names = poll_setting.default_show_names if poll_setting and poll_setting.default_show_names is not None else 1
+        default_show_count = poll_setting.default_show_count if poll_setting and poll_setting.default_show_count is not None else 1
 
         # In multiple choice polls, the number of voters is unique users, not total responses.
         total_voters = len(user_votes)
@@ -124,7 +124,7 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
             options_with_settings.sort(key=lambda x: x['is_priority'], reverse=True)
 
             total_collected = 0 # Specific to native polls with contributions
-            target_sum = poll_setting.target_sum if poll_setting else 0
+            target_sum = poll_setting.target_sum if poll_setting and poll_setting.target_sum is not None else 0
 
             for option_data in options_with_settings:
                 option_text = option_data['text']

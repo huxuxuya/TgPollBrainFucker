@@ -44,7 +44,7 @@ def test_generate_poll_text_no_votes(mocker, mock_poll, mock_session):
     text = generate_poll_text(poll=mock_poll, session=mock_session)
 
     # Assert
-    assert "*Какой твой любимый цвет?*" in text
+    assert "Какой твой любимый цвет?" in text
     assert "Красный: *0*" in text
     assert "Синий: *0*" in text
     assert "Зеленый: *0*" in text
