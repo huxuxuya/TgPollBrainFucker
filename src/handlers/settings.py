@@ -8,7 +8,6 @@ import asyncio
 
 from src import database as db
 from src.config import logger
-from src.display import generate_poll_text
 
 async def _edit_message_safely(
     context: ContextTypes.DEFAULT_TYPE,
