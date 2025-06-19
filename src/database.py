@@ -1,7 +1,7 @@
 import os
 import logging
 from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Boolean, Float, Text, PrimaryKeyConstraint, ForeignKey, inspect, text, UniqueConstraint, event, select
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, Mapped
 from typing import Union, List, Optional
 from telegram.helpers import escape_markdown

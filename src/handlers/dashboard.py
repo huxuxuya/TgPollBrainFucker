@@ -437,7 +437,7 @@ async def show_group_dashboard(query: CallbackQuery, context: ContextTypes.DEFAU
 async def show_poll_list(query: CallbackQuery, chat_id: int, status: str):
     session = db.SessionLocal()
     try:
-        polls = db.get_polls_by_status(session, chat_id, status)
+        polls = db.get_polls_by_status(chat_id, status)
         status_text_map = {'active': 'активных опросов', 'draft': 'черновиков', 'closed': 'завершённых опросов'}
         text_part = status_text_map.get(status, f'{status} опросов')
 
