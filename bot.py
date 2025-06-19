@@ -2,7 +2,12 @@ import asyncio
 import os
 import json
 import importlib.util
+import sys
 from contextlib import asynccontextmanager
+
+# Fix for asyncio on Windows
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 from pathlib import Path
 from starlette.applications import Starlette
 from starlette.routing import Route, Mount
@@ -132,26 +137,44 @@ for app_id, app_data in BUNDLED_WEB_APPS.items():
 server = Starlette(routes=routes, lifespan=lifespan)
 
 async def main() -> None:
-    """Starts the bot in polling mode for local development."""
+    """Initializes and runs the bot in polling mode with robust lifecycle management."""
     logger.info("Running in development mode (polling)...")
     init_database()
-    load_bundled_web_apps()
     application.bot_data['BUNDLED_WEB_APPS'] = BUNDLED_WEB_APPS
-    
-    # Remove any existing webhook
-    logger.info("Deleting webhook...")
-    await application.bot.delete_webhook()
-    
-    # Start polling
-    logger.info("Starting polling...")
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    # The `async with` statement handles application.initialize() and application.shutdown() gracefully.
+    async with application:
+        logger.info("Deleting any existing webhook...")
+        await application.bot.delete_webhook(drop_pending_updates=True)
+
+        logger.info("Bot is running. Press Ctrl+C to stop.")
+        # Start polling without creating a new event loop
+        await application.start()
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        # Keep running until interrupted
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            logger.info("Received shutdown signal.")
+        finally:
+            await application.updater.stop()
+            await application.stop()
+
+    logger.info("Bot shutdown complete.")
 
 
 if __name__ == "__main__":
     if DEV_MODE:
-        # The main() function handles loading apps for development polling mode.
-        asyncio.run(main())
+        # Avoid deprecation warning by handling event loop properly
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        # Run the main coroutine in the loop
+        loop.run_until_complete(main())
     else:
         # For production, Gunicorn will find the `server` object.
         # The top-level call to `load_bundled_web_apps()` ensures the routes are ready.
-        logger.info("Running in production mode. This script should be run by an ASGI server like Gunicorn.") 
+        logger.info("Running in production mode. This script should be run by an ASGI server like Gunicorn.")

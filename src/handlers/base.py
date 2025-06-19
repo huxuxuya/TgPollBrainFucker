@@ -12,6 +12,7 @@ from src.decorators import admin_only
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Sends a welcome message and the chat selection keyboard."""
+    logger.info(f"/start command received in chat {update.effective_chat.id} (type: {update.effective_chat.type})")
     if update.effective_chat.type == 'private':
         await dashboard.private_chat_entry_point(update, context)
     else:
@@ -55,13 +56,13 @@ async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.info(f"[DEBUG_UPDATE]: {update.to_dict()}")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.error("Exception while handling an update:", exc_info=context.error)
+    """Log Errors caused by Updates."""
+    logger.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
     if isinstance(context.error, ChatMigrated):
         old_chat_id = context.error.chat_id
         new_chat_id = context.error.new_chat_id
         logger.warning(f"Chat migrated from {old_chat_id} to {new_chat_id}")
         # Here you would ideally have a function to update the chat_id in all relevant tables
-        # For now, we'll just log it. A proper migration would be more involved.
 
 async def unrecognized_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
