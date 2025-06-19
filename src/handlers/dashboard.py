@@ -489,7 +489,7 @@ async def show_participants_list(query: CallbackQuery, chat_id: int, page: int =
     """Displays a paginated list of group participants."""
     session = db.SessionLocal()
     try:
-        participants = db.get_participants(session, chat_id)
+        participants = db.get_participants(chat_id, session=session)
         title = escape_markdown(db.get_group_title(chat_id), 2)
 
         if not participants:
@@ -531,7 +531,7 @@ async def show_exclude_menu(query: CallbackQuery, chat_id: int, page: int = 0):
     """Displays a paginated menu to exclude/include participants."""
     session = db.SessionLocal()
     try:
-        participants = db.get_participants(session, chat_id)
+        participants = db.get_participants(chat_id, session=session)
         title = escape_markdown(db.get_group_title(chat_id), 2)
 
         if not participants:

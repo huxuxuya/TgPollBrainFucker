@@ -176,8 +176,7 @@ def generate_poll_content(poll_id: int = None, poll: Optional[db.Poll] = None, s
         # Generate heatmap only if there are votes and the setting is enabled
         if responses and show_heatmap:
             image_bytes = generate_results_heatmap_image(
-                options=display_options,
-                responses=responses,
+                poll_id=poll_id,
                 session=session
             )
         
@@ -200,7 +199,7 @@ async def generate_nudge_text(poll_id: int) -> str:
         poll = db.get_poll(poll_id)
         if not poll: return "Опрос не найден."
         
-        participants = db.get_participants(poll.chat_id)
+        participants = db.get_participants(poll.chat_id, session=session)
         participant_ids = {p.user_id for p in participants if not p.excluded}
 
         respondents = db.get_responses(poll_id)

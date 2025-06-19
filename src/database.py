@@ -415,11 +415,18 @@ def get_polls_by_status(chat_id: int, status: str):
     session.close()
     return polls
 
-def get_participants(chat_id: int):
-    session = SessionLocal()
-    participants = session.query(Participant).filter_by(chat_id=chat_id).all()
-    session.close()
-    return participants
+def get_participants(chat_id: int, session: Optional[Session] = None):
+    """Fetches all participants for a given chat."""
+    manage_session = not session
+    if manage_session:
+        session = SessionLocal()
+    
+    try:
+        participants = session.query(Participant).filter_by(chat_id=chat_id).all()
+        return participants
+    finally:
+        if manage_session:
+            session.close()
 
 def get_participant(chat_id: int, user_id: int):
     session = SessionLocal()
