@@ -96,4 +96,28 @@ async def register_user_activity(update: Update, context: ContextTypes.DEFAULT_T
         first_name=first_name,
         last_name=last_name,
     )
-    logger.info(f"Registered activity for user {user_id} in chat {chat_id}") 
+    logger.info(f"Registered activity for user {user_id} in chat {chat_id}")
+
+# --- New Member Handler ---------------------------------------------------
+
+async def register_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Добавляет новых участников чата в таблицу participants сразу после вступления."""
+    if not update.message or not update.message.new_chat_members:
+        return
+
+    chat_id = update.effective_chat.id
+
+    for member in update.message.new_chat_members:
+        # Игнорируем ботов (в том числе самого бота)
+        if member.is_bot:
+            continue
+
+        db.add_user_to_participants(
+            chat_id=chat_id,
+            user_id=member.id,
+            username=member.username,
+            first_name=member.first_name or "",
+            last_name=member.last_name or "",
+        )
+
+        logger.info(f"New member {member.id} registered in chat {chat_id}") 

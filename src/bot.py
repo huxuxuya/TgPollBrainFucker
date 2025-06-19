@@ -18,6 +18,9 @@ application.add_handler(MessageHandler(filters.FORWARDED, misc.forwarded_message
 # Web App data handler
 application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, misc.web_app_data_handler))
 
+# Registration of new chat members (works even in privacy mode)
+application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, base.register_new_chat_members), group=-1)
+
 # Catch-all for other button presses not caught by specific handlers
 application.add_handler(CallbackQueryHandler(base.unrecognized_button))
 

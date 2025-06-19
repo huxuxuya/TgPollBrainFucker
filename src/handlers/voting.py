@@ -110,6 +110,13 @@ async def legacy_vote_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         option_index = int(parts[2])
         user = update.effective_user
         
+        db.add_user_to_participants(
+            chat_id=update.effective_chat.id,
+            user_id=user.id,
+            username=user.username,
+            first_name=user.first_name or "",
+            last_name=user.last_name or "",
+        )
         db.add_or_update_response(
             poll_id=poll_id,
             user_id=user.id,
@@ -142,6 +149,13 @@ async def vote_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     user = query.from_user
     
     # Register the vote first
+    db.add_user_to_participants(
+        chat_id=update.effective_chat.id,
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name or "",
+        last_name=user.last_name or "",
+    )
     db.add_or_update_response(
         poll_id=poll_id,
         user_id=user.id,
