@@ -163,61 +163,81 @@ def update_user(session: Session, user_id: int, first_name: str, last_name: str,
         user = User(user_id=user_id, first_name=first_name, last_name=last_name, username=username)
         session.add(user)
 
-def add_or_update_response(poll_id: int, user_id: int, first_name: str, last_name: str, username: str, option_index: int = None, option_text: str = None):
-    """Adds or updates a user's response to a poll, handling single and multiple choice."""
-    session = SessionLocal()
-    try:
-        # First, ensure the user exists in the main Users table
-        user = session.query(User).filter_by(user_id=user_id).first()
-        if not user:
-            user = User(user_id=user_id, first_name=first_name, last_name=last_name, username=username)
-            session.add(user)
-        else: # Update user's name if it has changed
-            user.first_name = first_name
-            user.last_name = last_name
-            user.username = username
-        
-        poll = session.query(Poll).filter_by(poll_id=poll_id).first()
-        poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
-        if not poll:
-            logger.error(f"Poll with ID {poll_id} not found, can't add response.")
+def add_or_update_response_ext(session: Session, poll_id: int, user_id: int, first_name: str, last_name: str, username: str, option_index: int = None, option_text: str = None):
+    """
+    Adds or updates a user's response to a poll using an EXISTING session.
+    This is the core logic.
+    """
+    # First, ensure the user exists in the main Users table
+    user = session.query(User).filter_by(user_id=user_id).first()
+    if not user:
+        user = User(user_id=user_id, first_name=first_name, last_name=last_name, username=username)
+        session.add(user)
+    else: # Update user's name if it has changed
+        user.first_name = first_name
+        user.last_name = last_name
+        user.username = username
+    
+    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+    poll_setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
+    if not poll:
+        logger.error(f"Poll with ID {poll_id} not found, can't add response.")
+        return
+
+    # Determine the response text
+    response_value = None
+    if option_text is not None:
+        response_value = option_text
+    elif option_index is not None:
+        try:
+            options = poll.options.split(',')
+            response_value = options[option_index].strip()
+        except IndexError:
+            logger.error(f"Invalid option index {option_index} for poll {poll_id}")
             return
+    else:
+        logger.error("Either option_index or option_text must be provided.")
+        return
 
-        # Determine the response text
-        response_value = None
-        if option_text is not None:
-            response_value = option_text
-        elif option_index is not None:
-            try:
-                options = poll.options.split(',')
-                response_value = options[option_index].strip()
-            except IndexError:
-                logger.error(f"Invalid option index {option_index} for poll {poll_id}")
-                return
+    allow_multiple = poll_setting.allow_multiple_answers if poll_setting else False
+
+    if allow_multiple:
+        # For multiple choice, check if this specific response exists and toggle it
+        response = session.query(Response).filter_by(poll_id=poll_id, user_id=user_id, response=response_value).first()
+        if response:
+            # User is un-voting for this option
+            session.delete(response)
         else:
-            logger.error("Either option_index or option_text must be provided.")
-            return
-
-        allow_multiple = poll_setting.allow_multiple_answers if poll_setting else False
-
-        if allow_multiple:
-            # For multiple choice, check if this specific response exists and toggle it
-            response = session.query(Response).filter_by(poll_id=poll_id, user_id=user_id, response=response_value).first()
-            if response:
-                # User is un-voting for this option
-                session.delete(response)
-            else:
-                # User is voting for a new option
-                new_response = Response(poll_id=poll_id, user_id=user_id, response=response_value)
-                session.add(new_response)
-        else:
-            # For single choice, remove all previous responses for this user in this poll
-            session.query(Response).filter_by(poll_id=poll_id, user_id=user_id).delete()
-            # And add the new one
+            # User is voting for a new option
             new_response = Response(poll_id=poll_id, user_id=user_id, response=response_value)
             session.add(new_response)
-        
+    else:
+        # For single choice, remove all previous responses for this user in this poll
+        session.query(Response).filter_by(poll_id=poll_id, user_id=user_id).delete()
+        # And add the new one
+        new_response = Response(poll_id=poll_id, user_id=user_id, response=response_value)
+        session.add(new_response)
+
+def add_or_update_response(poll_id: int, user_id: int, first_name: str, last_name: str, username: str, option_index: int = None, option_text: str = None):
+    """
+    Public-facing function that creates a session and calls the core logic.
+    """
+    session = SessionLocal()
+    try:
+        add_or_update_response_ext(
+            session=session,
+            poll_id=poll_id,
+            user_id=user_id,
+            first_name=first_name,
+            last_name=last_name,
+            username=username,
+            option_index=option_index,
+            option_text=option_text
+        )
         session.commit()
+    except Exception as e:
+        logger.error(f"Exception in add_or_update_response: {e}", exc_info=True)
+        session.rollback()
     finally:
         session.close()
 

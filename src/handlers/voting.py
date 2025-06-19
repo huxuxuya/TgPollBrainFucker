@@ -125,9 +125,16 @@ async def vote_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
     session = db.SessionLocal()
     try:
         poll = session.query(db.Poll).filter_by(poll_id=poll_id).first()
+        poll_settings = session.query(db.PollSetting).filter_by(poll_id=poll_id).first()
+
         if not poll or poll.status != 'active':
             await query.answer("Этот опрос больше не активен.", show_alert=True)
             return
+        
+        if not poll_settings:
+            # Create default settings if they don't exist, this is a good fallback
+            poll_settings = db.PollSetting(poll_id=poll_id)
+            session.add(poll_settings)
 
         # Register vote
         options = poll.options.split(',')
@@ -136,7 +143,17 @@ async def vote_callback_handler(update: Update, context: ContextTypes.DEFAULT_TY
             return
             
         selected_option = options[option_index].strip()
-        has_voted, new_vote = db.add_or_update_response(poll_id, user_id, user_name, selected_option, poll.allow_multiple, session)
+        
+        db.add_or_update_response_ext(
+            session=session,
+            poll_id=poll_id,
+            user_id=user_id,
+            first_name=query.from_user.first_name,
+            last_name=query.from_user.last_name,
+            username=query.from_user.username,
+            option_index=option_index
+        )
+        
         session.commit() # Commit the vote registration
         
         await query.answer(f"Ваш голос за «{selected_option}» засчитан!")
