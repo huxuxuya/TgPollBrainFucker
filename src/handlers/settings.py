@@ -90,6 +90,7 @@ async def show_option_settings_menu(query: Union[CallbackQuery, None], context: 
 
 async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: ContextTypes.DEFAULT_TYPE, poll_id: int, message_id: int = None, chat_id: int = None):
     """Shows the main settings menu for a specific poll."""
+    logger.info(f"show_poll_settings_menu: poll_id={poll_id}")
     poll = db.get_poll(poll_id)
     if not poll:
         if query: await query.answer("Опрос не найден.", show_alert=True)
@@ -222,6 +223,8 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     # Run as a background task to avoid blocking on network issues.
     asyncio.create_task(query.answer())
+    
+    logger.info(f"settings_callback_handler: data={query.data}")
     
     parts = query.data.split(':')
     command = parts[1]
