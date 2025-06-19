@@ -2,11 +2,25 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, W
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
+from sqlalchemy.orm.exc import StaleDataError
 import telegram
+
+
+def safe_commit(session, poll_id):
+    try:
+        safe_commit(session, poll_id)
+    except StaleDataError as e:
+        logger.warning(f"StaleDataError while committing poll update {poll_id}: {e}; retry retrying")
+        session.rollback()
+        session.expire_all()
+        try:
+            safe_commit(session, poll_id)
+        except Exception as e2:
+            logger.error(f"Second commit failed for poll {poll_id}: {e2}")
 
 from src import database as db
 from src.config import logger, WEB_URL
-from src.display import generate_poll_content
+from src.display import generate_poll_content, generate_nudge_text
 
 
 # Текст ошибки Telegram при невозможности удаления сообщения.
@@ -87,7 +101,25 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
                 # обычное текстовое сообщение
                 await context.bot.edit_message_text(text=new_caption, chat_id=poll.chat_id, message_id=poll.message_id, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
 
-            session.commit()
+            safe_commit(session, poll_id)
+
+            # --- Update nudge message if exists ---
+            if poll.nudge_message_id:
+                try:
+                    nudge_text = await generate_nudge_text(poll.poll_id)
+                    await context.bot.edit_message_text(
+                        chat_id=poll.chat_id,
+                        message_id=poll.nudge_message_id,
+                        text=nudge_text,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
+                    # If everyone has voted, optionally clear the nudge id
+                    if "Все участники проголосовали" in nudge_text:
+                        poll.nudge_message_id = None
+                        safe_commit(session, poll_id)
+                except BadRequest as e:
+                    if "Message is not modified" not in str(e):
+                        logger.warning(f"Failed to edit nudge message {poll.nudge_message_id}: {e}")
 
         except BadRequest as e:
             if "Message is not modified" not in str(e):

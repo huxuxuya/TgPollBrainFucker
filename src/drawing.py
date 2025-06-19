@@ -149,13 +149,15 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
         # --- Prepare question text (poll title) ---
         question_text = (poll.message or "").strip()
         title_lines = _wrap_text(question_text, FONT_BOLD, NAME_COLUMN_WIDTH + len(options)*MIN_CELL_WIDTH)
-        TITLE_MARGIN = 10  # extra spacing below title to separate from option headers
-        title_height = (len(title_lines) * 20) if title_lines and question_text else 0
+        # Calculate exact line height of the bold font to avoid overlaps
+        line_height = FONT_BOLD.getbbox("Ag")[3] - FONT_BOLD.getbbox("Ag")[1]
+        TITLE_MARGIN = 18  # extra spacing below title to separate from option headers
+        title_height = (len(title_lines) * (line_height + 2)) if title_lines and question_text else 0
         title_block_height = title_height + (TITLE_MARGIN if question_text else 0)
 
         wrapped_options = [_wrap_text(opt, FONT_REGULAR, MIN_CELL_WIDTH - 10) for opt in options]
         max_option_lines = max(len(w) for w in wrapped_options) if wrapped_options else 1
-        header_height = title_block_height + (max_option_lines * 18) + 10
+        header_height = title_block_height + (max_option_lines * 18) + 14
 
         image_width = NAME_COLUMN_WIDTH + (len(options) * MIN_CELL_WIDTH) + 2 * PADDING
         image_height = header_height + (len(participants) * CELL_HEIGHT) + 2 * PADDING
@@ -180,7 +182,7 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
                 text_width = FONT_BOLD.getlength(line)
                 x_pos = PADDING + (image_width - 2*PADDING - text_width)/2  # center align
                 draw.text((x_pos, cur_y), line, font=FONT_BOLD, fill=COLOR_TEXT)
-                cur_y += 20
+                cur_y += line_height + 2
 
         # --- Определяем лидирующий вариант ---
         option_counts = {opt: 0 for opt in options}
@@ -194,7 +196,7 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
         # --- Draw Option Headers ---
         for i, option_text_lines in enumerate(wrapped_options):
             x = PADDING + NAME_COLUMN_WIDTH + (i * MIN_CELL_WIDTH)
-            line_y = PADDING + 5 + title_block_height
+            line_y = PADDING + 6 + title_block_height
             # Если есть эмодзи для варианта — показываем крупно
             emoji = None
             if hasattr(poll, 'option_settings'):
@@ -208,9 +210,10 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
             for line in option_text_lines:
                 draw.text((x + 8, line_y), line, font=FONT_BOLD, fill=COLOR_TEXT)
                 line_y += 18
-            # Лидирующий вариант — рамка
-            if options[i] in leaders:
-                draw.rounded_rectangle([(x+2, header_rect_top+2), (x+MIN_CELL_WIDTH-4, header_rect_bottom-2)], radius=12, outline=(99,201,115,255), width=4)
+            # Лидирующий вариант — можно выделить другим способом (например, жирным текстом).
+            # Убираем обводку, чтобы шапки колонок были без рамок.
+            # if options[i] in leaders:
+            #     draw.rounded_rectangle([(x+2, header_rect_top+2), (x+MIN_CELL_WIDTH-4, header_rect_bottom-2)], radius=12, outline=(99,201,115,255), width=4)
 
         # --- Draw Participant Rows ---
         for p_idx, participant in enumerate(participants):

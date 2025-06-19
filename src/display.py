@@ -96,16 +96,19 @@ def generate_poll_content(poll_id: int = None, poll: Optional[db.Poll] = None, s
             pass
         # For webapp polls WITH votes, or for all native polls:
         elif poll.poll_type == 'webapp':
-            for option_text in display_options:
+            for i, option_text in enumerate(display_options):
                 count = counts.get(option_text, 0)
                 escaped_option_text = escape_markdown(option_text, version=2)
                 line = f"{escaped_option_text}: *{count}*"
                 text_parts.append(line)
 
                 if default_show_names and count > 0:
+                    # Retrieve emoji from option settings if set
+                    opt_setting = db.get_poll_option_setting(poll_id, i, session=session)
+                    prefix = (opt_setting.emoji + ' ') if opt_setting and opt_setting.emoji else "▫️ "
                     user_ids_for_option = votes_by_option.get(option_text, [])
                     user_names = [db.get_user_name(session, uid, markdown_link=True) for uid in user_ids_for_option]
-                    names_list = [f"▫️ {name}" for name in user_names]
+                    names_list = [f"{prefix}{name}" for name in user_names]
                     text_parts.append("\n".join(f"    {name}" for name in names_list))
                 text_parts.append("")
 
@@ -113,14 +116,14 @@ def generate_poll_content(poll_id: int = None, poll: Optional[db.Poll] = None, s
             options_with_settings = []
             original_options = [opt.strip() for opt in poll.options.split(',')]
             for i, option_text in enumerate(original_options):
-                opt_setting = db.get_poll_option_setting(poll_id, i)
+                opt_setting = db.get_poll_option_setting(poll_id, i, session=session)
                 options_with_settings.append({
                     'text': option_text,
                     'show_names': opt_setting.show_names if opt_setting and opt_setting.show_names is not None else default_show_names,
                     'names_style': opt_setting.names_style if opt_setting and opt_setting.names_style else 'list',
                     'is_priority': opt_setting.is_priority if opt_setting else 0,
                     'contribution_amount': opt_setting.contribution_amount if opt_setting else 0,
-                    'emoji': (opt_setting.emoji + ' ') if opt_setting and opt_setting.emoji else "",
+                    'emoji': (opt_setting.emoji + ' ') if opt_setting and opt_setting.emoji else "▫️ ",
                     'show_count': opt_setting.show_count if opt_setting and opt_setting.show_count is not None else default_show_count,
                     'show_contribution': opt_setting.show_contribution if opt_setting and opt_setting.show_contribution is not None else 1,
                 })

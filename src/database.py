@@ -376,8 +376,10 @@ def get_poll_setting(poll_id: int, create: bool = False, session: Optional[Sessi
         if manage_session:
             session.close()
 
-def get_poll_option_setting(poll_id: int, option_index: int, create: bool = False) -> Union[PollOptionSetting, None]:
-    session = SessionLocal()
+def get_poll_option_setting(poll_id: int, option_index: int, create: bool = False, session: Optional[Session] = None) -> Union[PollOptionSetting, None]:
+    manage_session = session is None
+    if manage_session:
+        session = SessionLocal()
     try:
         setting = session.query(PollOptionSetting).filter_by(poll_id=poll_id, option_index=option_index).first()
         if not setting and create:
@@ -385,13 +387,14 @@ def get_poll_option_setting(poll_id: int, option_index: int, create: bool = Fals
             session.add(setting)
             # Commit to persist, then refresh to make sure attributes are loaded
             session.commit()
-        if setting is not None:
-            # Ensure all scalar attributes are loaded and detach from session to avoid DetachedInstanceError
+        if setting is not None and manage_session:
+            # Ensure attributes loaded then detach so can be used outside
             session.refresh(setting)
             session.expunge(setting)
         return setting
     finally:
-        session.close()
+        if manage_session:
+            session.close()
 
 
 def get_known_chats():

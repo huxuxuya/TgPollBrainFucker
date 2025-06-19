@@ -331,7 +331,9 @@ async def show_poll_exclusion_menu(query: CallbackQuery, context: ContextTypes.D
             is_exc = p.user_id in excluded_ids
             icon = "🚫" if is_exc else "✅"
             text_lines.append(f"{icon} {name}")
-            kb_rows.append([InlineKeyboardButton(icon, callback_data=f"settings:toggle_excl:{poll_id}:{p.user_id}:{page}")])
+                        # Кнопка показывает значок и имя участника
+            button_label = f"{icon} " + db.get_user_name(session, p.user_id, markdown_link=False)[:32]
+            kb_rows.append([InlineKeyboardButton(button_label, callback_data=f"settings:toggle_excl:{poll_id}:{p.user_id}:{page}")])
 
         # Навигация
         nav_row = []

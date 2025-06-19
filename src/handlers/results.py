@@ -6,7 +6,7 @@ import asyncio
 
 from src import database as db
 from src.config import logger, WEB_URL
-from src.display import generate_poll_content
+from src.display import generate_poll_content, generate_nudge_text
 from src.drawing import generate_results_heatmap_image
 
 async def show_draft_poll_menu(context: ContextTypes.DEFAULT_TYPE, poll_id: int, chat_id: int, message_id: int):
@@ -182,8 +182,8 @@ async def move_to_bottom_handler(update: Update, context: ContextTypes.DEFAULT_T
         except Exception as e:
             logger.warning(f"Couldn't delete old poll message {poll.message_id}: {e}")
 
-        # Сгенерируем новый текст опроса (изображение для сообщения опроса не нужно)
-        new_text, _ = generate_poll_content(poll=poll, session=session)
+        # Сгенерируем контент опроса (текст + возможная тепловая карта)
+        new_text, image_bytes = generate_poll_content(poll=poll, session=session)
         kb = []
         if poll.poll_type == 'native':
             options = poll.options.split(',')
@@ -198,7 +198,21 @@ async def move_to_bottom_handler(update: Update, context: ContextTypes.DEFAULT_T
             kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
         
         try:
-            new_message = await context.bot.send_message(chat_id=poll.chat_id, text=new_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+            if image_bytes:
+                new_message = await context.bot.send_photo(
+                    chat_id=poll.chat_id,
+                    photo=image_bytes,
+                    caption=new_text,
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            else:
+                new_message = await context.bot.send_message(
+                    chat_id=poll.chat_id,
+                    text=new_text,
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
             poll.message_id = new_message.message_id
             session.commit()
         except Exception as e:
