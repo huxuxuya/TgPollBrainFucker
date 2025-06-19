@@ -2,6 +2,7 @@ import io
 from PIL import Image, ImageDraw, ImageFont
 from typing import Optional
 import os
+import math
 
 from . import database as db
 from .config import logger
@@ -67,6 +68,16 @@ def _wrap_text(text, font, max_width):
             line += words.pop(0) + ' '
         lines.append(line.strip())
     return lines
+
+def _draw_rounded_rectangle(draw, xy, radius, fill=None, outline=None, width=1, shadow=False):
+    # xy = (x1, y1, x2, y2)
+    x1, y1, x2, y2 = xy
+    if shadow:
+        # Draw shadow as a blurred rectangle (имитация)
+        shadow_color = (200, 200, 200, 80)
+        for offset in range(6, 0, -2):
+            draw.rounded_rectangle([x1+offset, y1+offset, x2+offset, y2+offset], radius=radius+offset, fill=shadow_color)
+    draw.rounded_rectangle(xy, radius=radius, fill=fill, outline=outline, width=width)
 
 def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] = None) -> io.BytesIO:
     """
@@ -142,81 +153,110 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
         image_width = NAME_COLUMN_WIDTH + (len(options) * MIN_CELL_WIDTH) + 2 * PADDING
         image_height = header_height + (len(participants) * CELL_HEIGHT) + 2 * PADDING
         
-        image = Image.new('RGB', (image_width, image_height), COLOR_BG)
-        draw = ImageDraw.Draw(image)
+        # --- Glassmorphism: полупрозрачный белый фон ---
+        image = Image.new('RGBA', (image_width, image_height), (255,255,255,0))
+        draw = ImageDraw.Draw(image, 'RGBA')
+        # Тень под таблицей
+        _draw_rounded_rectangle(draw, (8, 8, image_width-8, image_height-8), radius=24, fill=(200,200,220,60), shadow=True)
+        # Основная карточка
+        _draw_rounded_rectangle(draw, (0, 0, image_width, image_height), radius=24, fill=(255,255,255,220), outline=(220,220,240,255), width=3)
 
-        # --- Draw Content ---
-        # Header background
+        # --- Header ---
         header_rect_top = PADDING
         header_rect_bottom = PADDING + header_height
-        draw.rectangle([(PADDING, header_rect_top), (image_width - PADDING, header_rect_bottom)], fill=COLOR_HEADER_BG)
+        _draw_rounded_rectangle(draw, (PADDING, header_rect_top, image_width - PADDING, header_rect_bottom), radius=16, fill=(240,245,255,220))
 
-        # Draw Option Headers
+        # --- Определяем лидирующий вариант ---
+        option_counts = {opt: 0 for opt in options}
+        for r in responses:
+            resp = r.response.strip()
+            if resp in option_counts:
+                option_counts[resp] += 1
+        max_votes = max(option_counts.values()) if option_counts else 0
+        leaders = [opt for opt, cnt in option_counts.items() if cnt == max_votes and max_votes > 0]
+
+        # --- Draw Option Headers ---
         for i, option_text_lines in enumerate(wrapped_options):
             x = PADDING + NAME_COLUMN_WIDTH + (i * MIN_CELL_WIDTH)
             line_y = PADDING + 5
+            # Если есть эмодзи для варианта — показываем крупно
+            emoji = None
+            if hasattr(poll, 'option_settings'):
+                try:
+                    emoji = poll.option_settings[i].emoji
+                except Exception:
+                    emoji = None
+            if emoji:
+                draw.text((x + 40, line_y), emoji, font=ImageFont.truetype("arial.ttf", 28), fill=(0,0,0,255))
+                line_y += 32
             for line in option_text_lines:
                 draw.text((x + 8, line_y), line, font=FONT_BOLD, fill=COLOR_TEXT)
-                line_y += 18 # Line height
+                line_y += 18
+            # Лидирующий вариант — рамка
+            if options[i] in leaders:
+                draw.rounded_rectangle([(x+2, header_rect_top+2), (x+MIN_CELL_WIDTH-4, header_rect_bottom-2)], radius=12, outline=(99,201,115,255), width=4)
 
-        # Draw Participant Rows
+        # --- Draw Participant Rows ---
         for p_idx, participant in enumerate(participants):
             y = PADDING + header_height + (p_idx * CELL_HEIGHT)
-            
-            # Determine row background: excluded > alternating stripe > default
+            # Цвет строки
             if participant.excluded:
-                row_bg = COLOR_EXCLUDED_ROW
+                row_bg = (255, 235, 238, 220)
             elif p_idx % 2 == 1:
-                row_bg = COLOR_ROW_ALT_BG
+                row_bg = (250, 250, 250, 180)
             else:
-                row_bg = None
-
-            if row_bg:
-                draw.rectangle([(PADDING, y), (image_width - PADDING, y + CELL_HEIGHT)], fill=row_bg)
-
-            # Draw name with optional @username
+                row_bg = (255,255,255,0)
+            # Скругление только у первой и последней строки
+            radius = 14 if p_idx in (0, len(participants)-1) else 0
+            _draw_rounded_rectangle(draw, (PADDING, y, image_width - PADDING, y + CELL_HEIGHT), radius=radius, fill=row_bg)
+            # Имя
             user_name = db.get_user_name(session, participant.user_id)
-            if participant.username:
-                # Добавляем юзернейм, если его ещё нет в строке
-                if f"@{participant.username}" not in user_name:
-                    user_name = f"{user_name} (@{participant.username})"
-
-            # Обрезаем, если не влезает
+            if participant.username and f"@{participant.username}" not in user_name:
+                user_name = f"{user_name} (@{participant.username})"
             if FONT_REGULAR.getlength(user_name) > NAME_COLUMN_WIDTH - 10:
-                # Грубая обрезка по символам – достаточно для UI
                 while FONT_REGULAR.getlength(user_name + '…') > NAME_COLUMN_WIDTH - 10 and len(user_name) > 1:
                     user_name = user_name[:-1]
                 user_name += '…'
-
             draw.text((PADDING + 5, y + (CELL_HEIGHT // 2) - 8), user_name, font=FONT_REGULAR, fill=COLOR_TEXT)
-            
-            # Draw vote cells
+            # Ячейки голосов
             for o_idx, option_text in enumerate(options):
                 x = PADDING + NAME_COLUMN_WIDTH + (o_idx * MIN_CELL_WIDTH)
-                cell_color = COLOR_VOTE_NO
-                if (participant.user_id, option_text) in votes:
-                    cell_color = COLOR_VOTE_YES
-                draw.rectangle([(x, y), (x + MIN_CELL_WIDTH, y + CELL_HEIGHT)], fill=cell_color)
-
-        # --- Draw Gridlines ---
-        # Vertical gridlines
+                voted = (participant.user_id, option_text) in votes
+                # Градиент по количеству голосов за вариант
+                votes_for_option = option_counts[option_text]
+                if max_votes > 0:
+                    intensity = int(80 + 120 * (votes_for_option / max_votes))
+                else:
+                    intensity = 80
+                if voted:
+                    cell_color = (99, 201, 115, intensity)
+                else:
+                    cell_color = (245, 245, 245, 180)
+                # Скругление только у первой/последней строки и первой/последней колонки
+                cell_radius = 10 if (p_idx in (0, len(participants)-1) or o_idx in (0, len(options)-1)) else 0
+                _draw_rounded_rectangle(draw, (x+4, y+4, x + MIN_CELL_WIDTH-6, y + CELL_HEIGHT-6), radius=cell_radius, fill=cell_color)
+                # Акцент для лидирующего варианта
+                if option_text in leaders and voted:
+                    draw.rounded_rectangle([(x+8, y+8), (x+MIN_CELL_WIDTH-10, y+CELL_HEIGHT-10)], radius=cell_radius, outline=(99,201,115,255), width=3)
+            # Иконка исключённого
+            if participant.excluded:
+                draw.text((PADDING + 5, y + (CELL_HEIGHT // 2) - 8), "🚫", font=FONT_BOLD, fill=(220,0,0,255))
+        # --- Gridlines (мягкие) ---
         for i in range(len(options) + 2):
             x_pos = PADDING + NAME_COLUMN_WIDTH + (i * MIN_CELL_WIDTH) if i > 0 else PADDING
-            draw.line([(x_pos, PADDING), (x_pos, image_height - PADDING)], fill=COLOR_GRID)
-        # Horizontal gridlines
+            draw.line([(x_pos, PADDING), (x_pos, image_height - PADDING)], fill=(220,220,220,120))
         for i in range(len(participants) + 1):
             y_pos = PADDING + header_height + (i * CELL_HEIGHT)
-            draw.line([(PADDING, y_pos), (image_width - PADDING, y_pos)], fill=COLOR_GRID)
-        
+            draw.line([(PADDING, y_pos), (image_width - PADDING, y_pos)], fill=(220,220,220,120))
         # Bolder separator for names
-        draw.line([(PADDING + NAME_COLUMN_WIDTH, PADDING), (PADDING + NAME_COLUMN_WIDTH, image_height - PADDING)], fill=COLOR_BORDER, width=2)
-        
+        draw.line([(PADDING + NAME_COLUMN_WIDTH, PADDING), (PADDING + NAME_COLUMN_WIDTH, image_height - PADDING)], fill=(190,190,190,180), width=2)
         # Outer border
-        draw.rectangle([(PADDING, PADDING), (image_width - PADDING, image_height - PADDING)], outline=COLOR_BORDER, width=2)
-        
+        _draw_rounded_rectangle(draw, (PADDING, PADDING, image_width - PADDING, image_height - PADDING), radius=18, outline=(190,190,190,200), width=3)
         # --- Finalize ---
+        out = Image.new('RGB', (image_width, image_height), (255,255,255))
+        out.paste(image, (0,0), image)
         image_buffer = io.BytesIO()
-        image.save(image_buffer, format='PNG')
+        out.save(image_buffer, format='PNG')
         image_buffer.seek(0)
         
         return image_buffer
