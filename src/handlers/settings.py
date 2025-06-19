@@ -350,9 +350,30 @@ async def show_poll_exclusion_menu(query: CallbackQuery, context: ContextTypes.D
     finally:
         session.close()
 
+from src.display import generate_nudge_text
+
 async def toggle_exclude_in_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int, user_id: int, page: int):
     """Переключает исключение участника и возвращает в меню."""
     excluded = db.toggle_poll_exclusion(poll_id, user_id)
     await query.answer("Исключён" if excluded else "Включён", show_alert=False)
     # Обновляем меню той же страницы
-    await show_poll_exclusion_menu(query, context, poll_id, page) 
+    await show_poll_exclusion_menu(query, context, poll_id, page)
+
+    # --- Refresh nudge message, if any ---
+    poll = db.get_poll(poll_id)
+    if poll and poll.nudge_message_id:
+        try:
+            nudge_text = await generate_nudge_text(poll_id)
+            await context.bot.edit_message_text(
+                chat_id=poll.chat_id,
+                message_id=poll.nudge_message_id,
+                text=nudge_text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+            )
+            # if nobody pending -> clear id
+            if "Все участники проголосовали" in nudge_text or "*Ждем вашего голоса:*" in nudge_text and nudge_text.strip().endswith("!_ 🎉"):
+                poll.nudge_message_id = None
+                db.commit_session(poll)
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                logger.warning(f"Failed to edit nudge message after exclusion change: {e}")
