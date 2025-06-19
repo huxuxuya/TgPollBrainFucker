@@ -34,12 +34,30 @@ async def _edit_message_safely(
     except BadRequest as e:
         if "Message is not modified" in str(e):
             logger.info("Message not modified, ignoring.")
-            if query: await query.answer() # Still acknowledge the callback
+            if query: await query.answer()
+        elif "There is no text in the message to edit" in str(e):
+            # Пробуем как caption (если это фото)
+            try:
+                if query and query.message and query.message.photo:
+                    await query.edit_message_caption(
+                        caption=escaped_text,
+                        reply_markup=reply_markup,
+                        parse_mode=ParseMode.MARKDOWN_V2
+                    )
+                elif chat_id and message_id:
+                    await context.bot.edit_message_caption(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        caption=escaped_text,
+                        reply_markup=reply_markup,
+                        parse_mode=ParseMode.MARKDOWN_V2
+                    )
+            except Exception as e2:
+                logger.error(f"Failed to edit caption after text error: {e2}")
+                if query: await query.answer("Ошибка при обновлении подписи.", show_alert=True)
         else:
             logger.error(f"BadRequest on editing message: {e}\nOriginal text: {text}")
             if query: await query.answer("Произошла ошибка при обновлении сообщения.", show_alert=True)
-            # Re-raising might be too disruptive, logging is often enough.
-            # raise
 
 async def show_nudge_emoji_menu(query: Union[CallbackQuery, None], context: ContextTypes.DEFAULT_TYPE, poll_id: int, message_id: int = None, chat_id: int = None):
     poll_setting = db.get_poll_setting(poll_id)
