@@ -383,7 +383,12 @@ def get_poll_option_setting(poll_id: int, option_index: int, create: bool = Fals
         if not setting and create:
             setting = PollOptionSetting(poll_id=poll_id, option_index=option_index)
             session.add(setting)
+            # Commit to persist, then refresh to make sure attributes are loaded
             session.commit()
+        if setting is not None:
+            # Ensure all scalar attributes are loaded and detach from session to avoid DetachedInstanceError
+            session.refresh(setting)
+            session.expunge(setting)
         return setting
     finally:
         session.close()
