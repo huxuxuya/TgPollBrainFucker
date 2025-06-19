@@ -3,7 +3,7 @@ import logging
 from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Boolean, Float, Text, PrimaryKeyConstraint, ForeignKey, inspect, text, UniqueConstraint, event, select
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, Mapped
-from typing import Union, List, Optional
+from typing import Union, List, Optional, Set
 from telegram.helpers import escape_markdown
 
 logger = logging.getLogger(__name__)
@@ -606,7 +606,7 @@ def commit_session(*instances):
     finally:
         session.close()
 
-def get_poll_exclusions(poll_id: int, session: Optional[Session] = None) -> set[int]:
+def get_poll_exclusions(poll_id: int, session: Optional[Session] = None) -> Set[int]:
     """Возвращает набор user_id, исключённых из данного опроса."""
     manage_session = session is None
     if manage_session:

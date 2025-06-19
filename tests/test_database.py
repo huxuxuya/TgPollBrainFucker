@@ -3,7 +3,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 # Import the models and function to be tested
-from src.database import Base, Poll, Response, PollSetting, User, add_or_update_response
+from src.database import Base, Poll, Participant, Response, PollSetting, User, add_or_update_response
 
 # --- Test Database Fixture ---
 
