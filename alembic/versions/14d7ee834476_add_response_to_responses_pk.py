@@ -32,8 +32,12 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint('poll_id', 'user_id', 'response')
     )
     
-    # Copy data from old to new table, using INSERT OR IGNORE to skip duplicates
-    op.execute("INSERT OR IGNORE INTO responses_new (poll_id, user_id, response) SELECT poll_id, user_id, '' FROM responses")
+    # Copy data from old to new table, handling duplicates based on dialect
+    bind = op.get_bind()
+    if bind.dialect.name == 'postgresql':
+        op.execute("INSERT INTO responses_new (poll_id, user_id, response) SELECT poll_id, user_id, '' FROM responses ON CONFLICT (poll_id, user_id, response) DO NOTHING")
+    else: # sqlite
+        op.execute("INSERT OR IGNORE INTO responses_new (poll_id, user_id, response) SELECT poll_id, user_id, '' FROM responses")
     
     # Drop old table and rename new one
     op.drop_table('responses')
@@ -54,8 +58,12 @@ def downgrade() -> None:
         sa.PrimaryKeyConstraint('poll_id', 'user_id')
     )
     
-    # Copy data from current to new table, using INSERT OR IGNORE to skip duplicates
-    op.execute("INSERT OR IGNORE INTO responses_new (poll_id, user_id) SELECT DISTINCT poll_id, user_id FROM responses")
+    # Copy data from current to new table, handling duplicates based on dialect
+    bind = op.get_bind()
+    if bind.dialect.name == 'postgresql':
+        op.execute("INSERT INTO responses_new (poll_id, user_id) SELECT DISTINCT poll_id, user_id FROM responses ON CONFLICT (poll_id, user_id) DO NOTHING")
+    else: # sqlite
+        op.execute("INSERT OR IGNORE INTO responses_new (poll_id, user_id) SELECT DISTINCT poll_id, user_id FROM responses")
     
     # Drop old table and rename new one
     op.drop_table('responses')
