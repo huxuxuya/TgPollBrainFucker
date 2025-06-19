@@ -62,6 +62,7 @@ application = Application.builder().token(BOT_TOKEN).build()
 
 # Register all handlers
 application.add_handler(TypeHandler(Update, base.track_chats), group=-1)
+application.add_handler(MessageHandler(filters.ChatType.GROUPS, base.register_user_activity), group=-2)
 application.add_handler(CommandHandler("start", base.start))
 application.add_handler(CommandHandler("help", base.help_command))
 application.add_handler(CommandHandler("dashboard", dashboard.private_chat_entry_point))

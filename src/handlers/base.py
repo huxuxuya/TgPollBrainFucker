@@ -66,4 +66,24 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def unrecognized_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     logger.warning(f"Unrecognized callback_data received: '{query.data}'")
-    await query.answer("Хм, я не распознал эту кнопку. Возможно, она от старого сообщения.", show_alert=True) 
+    await query.answer("Хм, я не распознал эту кнопку. Возможно, она от старого сообщения.", show_alert=True)
+
+async def register_user_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Tracks user activity and registers them in the database.
+    This runs for any message to ensure all active users are known.
+    """
+    if not update.message or not update.message.from_user or not update.message.chat:
+        return
+
+    # Ignore messages from the anonymous "Group" user or private chats for this purpose
+    if update.message.chat.type == 'private' or update.message.from_user.is_bot:
+        return
+        
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat.id
+    user_name = update.message.from_user.full_name
+    
+    # This function will handle adding the user and participant if they don't exist.
+    db.add_participant(chat_id, user_id, user_name)
+    logger.info(f"Registered activity for user {user_id} in chat {chat_id}") 
