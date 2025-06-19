@@ -3,7 +3,7 @@ import logging
 from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Boolean, Float, Text, PrimaryKeyConstraint, ForeignKey, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
-from typing import Union, List
+from typing import Union, List, Optional
 from telegram.helpers import escape_markdown
 
 logger = logging.getLogger(__name__)
@@ -344,17 +344,28 @@ def get_responses(poll_id: int) -> List[Response]:
     session.close()
     return responses
 
-def get_poll_setting(poll_id: int, create: bool = False) -> Union[PollSetting, None]:
-    session = SessionLocal()
+def get_poll_setting(poll_id: int, create: bool = False, session: Optional[Session] = None) -> Optional[PollSetting]:
+    """Retrieves settings for a specific poll."""
+    manage_session = not session
+    if manage_session:
+        session = SessionLocal()
+    
     try:
         setting = session.query(PollSetting).filter_by(poll_id=poll_id).first()
         if not setting and create:
             setting = PollSetting(poll_id=poll_id)
             session.add(setting)
-            session.commit()
+            # We need to commit here if we created it, so the calling function can use it.
+            # A flush might be sufficient, but commit is safer for cross-function use.
+            if manage_session:
+                session.commit()
+            else:
+                # If we are in a managed session, just flush to get the ID
+                session.flush()
         return setting
     finally:
-        session.close()
+        if manage_session:
+            session.close()
 
 def get_poll_option_setting(poll_id: int, option_index: int, create: bool = False) -> Union[PollOptionSetting, None]:
     session = SessionLocal()
