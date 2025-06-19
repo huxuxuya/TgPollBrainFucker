@@ -11,7 +11,7 @@ from starlette.responses import PlainTextResponse, JSONResponse
 from starlette.staticfiles import StaticFiles
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, TypeHandler
 from telegram import Update
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect, text as sa_text
 from sqlalchemy.exc import ProgrammingError
 
 from src.config import BOT_TOKEN, logger, WEB_URL, DEV_MODE
@@ -65,7 +65,7 @@ def check_and_update_db_schema():
                     logger.info(f"Schema Update: Adding column '{column_name}' to '{TABLE_NAME}'...")
                     trans = connection.begin()
                     try:
-                        connection.execute(text(f'ALTER TABLE {TABLE_NAME} ADD COLUMN {column_name} {column_type}'))
+                        connection.execute(sa_text(f'ALTER TABLE {TABLE_NAME} ADD COLUMN {column_name} {column_type}'))
                         trans.commit()
                         logger.info(f"   Column '{column_name}' added successfully.")
                     except Exception as e:
@@ -79,8 +79,8 @@ def check_and_update_db_schema():
                 try:
                     # Try to set the default first, which is safe.
                     trans = connection.begin()
-                    connection.execute(text(f"ALTER TABLE {TABLE_NAME} ALTER COLUMN {col_name} {col_default}"))
-                    connection.execute(text(f"ALTER TABLE {TABLE_NAME} ALTER COLUMN {col_name} TYPE {col_type} {col_using}"))
+                    connection.execute(sa_text(f"ALTER TABLE {TABLE_NAME} ALTER COLUMN {col_name} {col_default}"))
+                    connection.execute(sa_text(f"ALTER TABLE {TABLE_NAME} ALTER COLUMN {col_name} TYPE {col_type} {col_using}"))
                     trans.commit()
                     logger.info(f"Schema Update: Successfully altered column '{col_name}'.")
                 except ProgrammingError as e:
