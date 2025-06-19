@@ -77,10 +77,12 @@ def check_and_update_db_schema():
                 # This is a simplified check. A more robust system would inspect the type directly.
                 # For now, we assume if it needs altering, the change hasn't run.
                 try:
-                    # Try to set the default first, which is safe.
+                    # Execute the statements in the correct order:
+                    # 1. Change the column type from INT to BOOLEAN.
+                    # 2. Set the new BOOLEAN default.
                     trans = connection.begin()
-                    connection.execute(sa_text(f"ALTER TABLE {TABLE_NAME} ALTER COLUMN {col_name} {col_default}"))
                     connection.execute(sa_text(f"ALTER TABLE {TABLE_NAME} ALTER COLUMN {col_name} TYPE {col_type} {col_using}"))
+                    connection.execute(sa_text(f"ALTER TABLE {TABLE_NAME} ALTER COLUMN {col_name} {col_default}"))
                     trans.commit()
                     logger.info(f"Schema Update: Successfully altered column '{col_name}'.")
                 except ProgrammingError as e:
