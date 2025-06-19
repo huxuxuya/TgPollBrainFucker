@@ -477,7 +477,7 @@ async def show_poll_list(query: CallbackQuery, chat_id: int, status: str):
             if "There is no text in the message" in str(e):
                 # Если исходное сообщение было фото/медиа без текста
                 if query.message and query.message.photo:
-                    await query.bot.edit_message_caption(
+                    await query._bot.edit_message_caption(
                         chat_id=query.message.chat_id,
                         message_id=query.message.message_id,
                         caption=text,
@@ -486,8 +486,8 @@ async def show_poll_list(query: CallbackQuery, chat_id: int, status: str):
                     )
                 else:
                     # fallback: удалить и отправить новое текстовое сообщение
-                    await query.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
-                    await query.bot.send_message(
+                    await query._bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
+                    await query._bot.send_message(
                         chat_id=query.message.chat_id,
                         text=text,
                         reply_markup=InlineKeyboardMarkup(kb),

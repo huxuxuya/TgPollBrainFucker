@@ -41,10 +41,25 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(kb) if kb else None
 
         try:
-            if new_image and poll.photo_file_id:
-                # обновляем само изображение
-                media = InputMediaPhoto(media=new_image, caption=new_caption, parse_mode=ParseMode.MARKDOWN_V2)
-                await context.bot.edit_message_media(chat_id=poll.chat_id, message_id=poll.message_id, media=media, reply_markup=reply_markup)
+            if new_image and not poll.photo_file_id:
+                # Раньше было текстовое сообщение, теперь хотим добавить изображение
+                new_msg = await context.bot.send_photo(
+                    chat_id=poll.chat_id,
+                    photo=new_image,
+                    caption=new_caption,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+                # После успешной отправки пробуем удалить старое текстовое сообщение
+                try:
+                    await context.bot.delete_message(chat_id=poll.chat_id, message_id=poll.message_id)
+                except BadRequest as e:
+                    if DELETE_ERROR_PHRASE not in str(e):
+                        raise
+                    logger.warning(f"Couldn't delete old text message {poll.message_id}: {e}")
+
+                poll.message_id = new_msg.message_id
+                poll.photo_file_id = new_msg.photo[-1].file_id if new_msg.photo else None
             elif poll.photo_file_id:
                 # есть фото, но мы не обновляем его – меняем подпись
                 await context.bot.edit_message_caption(chat_id=poll.chat_id, message_id=poll.message_id, caption=new_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)

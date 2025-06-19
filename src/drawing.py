@@ -1,6 +1,7 @@
 import io
 from PIL import Image, ImageDraw, ImageFont
 from typing import Optional
+import os
 
 from . import database as db
 from .config import logger
@@ -8,14 +9,32 @@ from .config import logger
 from collections import namedtuple
 
 # --- Constants ---
-try:
-    # Using a common font, assuming it exists. A bundled font would be more robust.
-    FONT_REGULAR = ImageFont.truetype("arial.ttf", 15)
-    FONT_BOLD = ImageFont.truetype("arialbd.ttf", 16)
-except IOError:
-    logger.warning("Arial font not found. Using default PIL font. Text rendering might be poor.")
-    FONT_REGULAR = ImageFont.load_default()
-    FONT_BOLD = ImageFont.load_default()
+def _load_font(name_candidates, size):
+    """Пробует последовательно список имён/путей к TTF-файлам и возвращает первый найденный."""
+    for cand in name_candidates:
+        try:
+            return ImageFont.truetype(cand, size)
+        except IOError:
+            continue
+    return None
+
+# Попытка загрузить шрифт с поддержкой кириллицы.
+FONT_REGULAR = _load_font([
+    "arial.ttf",  # Windows / пользователь может установить
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "DejaVuSans.ttf",
+], 15)
+
+FONT_BOLD = _load_font([
+    "arialbd.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "DejaVuSans-Bold.ttf",
+], 16)
+
+if FONT_REGULAR is None or FONT_BOLD is None:
+    logger.warning("Fallback to default PIL font; Cyrillic glyphs may look poor.")
+    FONT_REGULAR = FONT_REGULAR or ImageFont.load_default()
+    FONT_BOLD = FONT_BOLD or ImageFont.load_default()
 
 # Colors
 COLOR_BG = (255, 255, 255)
