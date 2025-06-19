@@ -174,10 +174,20 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
             if row_bg:
                 draw.rectangle([(PADDING, y), (image_width - PADDING, y + CELL_HEIGHT)], fill=row_bg)
 
-            # Draw name (and truncate if necessary)
+            # Draw name with optional @username
             user_name = db.get_user_name(session, participant.user_id)
+            if participant.username:
+                # Добавляем юзернейм, если его ещё нет в строке
+                if f"@{participant.username}" not in user_name:
+                    user_name = f"{user_name} (@{participant.username})"
+
+            # Обрезаем, если не влезает
             if FONT_REGULAR.getlength(user_name) > NAME_COLUMN_WIDTH - 10:
-                user_name = user_name[:30] + '…'
+                # Грубая обрезка по символам – достаточно для UI
+                while FONT_REGULAR.getlength(user_name + '…') > NAME_COLUMN_WIDTH - 10 and len(user_name) > 1:
+                    user_name = user_name[:-1]
+                user_name += '…'
+
             draw.text((PADDING + 5, y + (CELL_HEIGHT // 2) - 8), user_name, font=FONT_REGULAR, fill=COLOR_TEXT)
             
             # Draw vote cells
