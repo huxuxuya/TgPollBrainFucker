@@ -108,48 +108,17 @@ class PollExclusion(Base):
 
 
 # --- Database migrations ---
-def run_migrations():
-    """Run database migrations when needed."""
-    try:
-        inspector = inspect(engine)
-        with engine.connect() as connection:
-            # Add web_app_id column if it doesn't exist
-            if not inspector.has_table("polls") or not any(c.name == 'web_app_id' for c in inspector.get_columns('polls')):
-                connection.execute(text('ALTER TABLE polls ADD COLUMN web_app_id VARCHAR'))
-                if connection.engine.dialect.name != 'sqlite':
-                    connection.commit()
-                logger.info("MIGRATION: Successfully added 'web_app_id' column.")
+# The manual run_migrations() function has been removed.
+# All schema changes are now handled by Alembic to ensure consistency.
 
-            # Remove obsolete web_apps table if it exists
-            if inspector.has_table("web_apps"):
-                logger.info("MIGRATION: Obsolete 'web_apps' table found. Removing it.")
-                connection.execute(text('DROP TABLE web_apps'))
-                if connection.engine.dialect.name != 'sqlite':
-                    connection.commit()
-                logger.info("MIGRATION: Successfully dropped 'web_apps' table.")
-
-            # --- Migration 3: Fix responses table primary key for multiple selections ---
-            if 'responses' in inspector.get_table_names():
-                logger.info("MIGRATION: Checking responses table primary key...")
-                try:
-                    # No specific migration needed for multiple selections yet
-                    pass
-                except Exception as e:
-                    logger.error(f"MIGRATION FAILED for responses table: {e}")
-                    try:
-                        # Attempt to roll back the migration
-                        connection.rollback()
-                    except Exception as rollback_e:
-                        logger.error(f"Failed to roll back migration: {rollback_e}")
-
-    except Exception as e:
-        logger.error(f"MIGRATION FAILED: {e}")
-
-# Initialize database connection and ensure Alembic migrations are up to date
+# Initialize database connection
 def init_database():
-    """Initialize database connection and ensure migrations are run."""
-    Base.metadata.create_all(engine)
-    run_migrations()
+    """
+    Initializes the database. Alembic is now the single source of truth for migrations,
+    so manual migration and table creation logic has been removed.
+    The deployment process should run 'alembic upgrade head' to apply migrations.
+    """
+    pass
 
 
 def update_user(session: Session, user_id: int, first_name: str, last_name: str, username: str = None):
