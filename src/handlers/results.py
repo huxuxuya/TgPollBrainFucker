@@ -1,4 +1,4 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, InputMediaPhoto
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 import telegram
@@ -49,7 +49,7 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
         await query.edit_message_text("Опрос не найден.")
         return
 
-    text, _ = generate_poll_content(poll_id)
+    text, image_bytes = generate_poll_content(poll_id)
     kb_rows = []
     if poll.status == 'active':
         kb_rows.append([
@@ -70,14 +70,41 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
     kb_rows.append([InlineKeyboardButton("⚙️ Настроить", callback_data=f"settings:poll_menu:{poll_id}")])
     kb_rows.append([InlineKeyboardButton("↩️ К списку", callback_data=f"dash:polls:{poll.chat_id}:{poll.status}")])
     
+    reply_markup = InlineKeyboardMarkup(kb_rows)
+
     try:
-        await query.edit_message_text(text=text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.MARKDOWN_V2)
+        if image_bytes:
+            # Если в сообщении уже есть картинка, пробуем отредактировать медиа
+            if query.message.photo:
+                media = InputMediaPhoto(media=image_bytes, caption=text, parse_mode=ParseMode.MARKDOWN_V2)
+                await query.edit_message_media(media=media, reply_markup=reply_markup)
+            else:
+                # Иначе удаляем текстовое сообщение и шлём новое фото
+                await query.delete_message()
+                await context.bot.send_photo(chat_id=query.message.chat_id,
+                                             photo=image_bytes,
+                                             caption=text,
+                                             reply_markup=reply_markup,
+                                             parse_mode=ParseMode.MARKDOWN_V2)
+        else:
+            # Нет изображения – показываем только текст
+            if query.message.photo:
+                # Старое было фото – заменяем на текст
+                await query.delete_message()
+                await context.bot.send_message(chat_id=query.message.chat_id,
+                                               text=text,
+                                               reply_markup=reply_markup,
+                                               parse_mode=ParseMode.MARKDOWN_V2)
+            else:
+                # Обычное обновление текста
+                await query.edit_message_text(text=text,
+                                              reply_markup=reply_markup,
+                                              parse_mode=ParseMode.MARKDOWN_V2)
     except telegram.error.BadRequest as e:
         if "Message is not modified" in str(e):
-            # This is okay, just means we're refreshing but nothing changed.
             logger.info("Poll results were not modified, skipping message edit.")
         else:
-            # Re-raise other bad requests
+            # Неожиданные ошибки пробрасываем выше для логирования
             raise e
 
     if query.data.startswith('results:refresh'):
