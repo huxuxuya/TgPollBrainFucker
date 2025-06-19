@@ -29,7 +29,7 @@ def upgrade() -> None:
         sa.Column('poll_id', sa.Integer(), nullable=False),
         sa.Column('user_id', sa.BigInteger(), nullable=False),
         sa.Column('response', sa.Text(), nullable=False),
-        sa.PrimaryKeyConstraint('poll_id', 'user_id', 'response', name='responses_pkey')
+        sa.PrimaryKeyConstraint('poll_id', 'user_id', 'response')
     )
     
     # Copy data from old to new table, using INSERT OR IGNORE to skip duplicates
@@ -51,7 +51,7 @@ def downgrade() -> None:
         'responses_new',
         sa.Column('poll_id', sa.Integer(), nullable=False),
         sa.Column('user_id', sa.BigInteger(), nullable=False),
-        sa.PrimaryKeyConstraint('poll_id', 'user_id', name='responses_pkey')
+        sa.PrimaryKeyConstraint('poll_id', 'user_id')
     )
     
     # Copy data from current to new table, using INSERT OR IGNORE to skip duplicates
