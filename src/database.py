@@ -355,17 +355,31 @@ def get_user_name(session: Session, user_id: int, markdown_link: bool = False) -
     return name
 
 # Functions to fetch data for display logic
-def get_poll(poll_id: int):
-    session = SessionLocal()
-    poll = session.query(Poll).filter_by(poll_id=poll_id).first()
-    session.close()
-    return poll
+def get_poll(poll_id: int, session: Optional[Session] = None):
+    """Fetches a poll by its ID, optionally using an existing session."""
+    manage_session = not session
+    if manage_session:
+        session = SessionLocal()
+    
+    try:
+        poll = session.query(Poll).filter_by(poll_id=poll_id).first()
+        return poll
+    finally:
+        if manage_session:
+            session.close()
 
-def get_responses(poll_id: int) -> List[Response]:
-    session = SessionLocal()
-    responses = session.query(Response).filter_by(poll_id=poll_id).all()
-    session.close()
-    return responses
+def get_responses(poll_id: int, session: Optional[Session] = None) -> List[Response]:
+    """Fetches all responses for a poll, optionally using an existing session."""
+    manage_session = not session
+    if manage_session:
+        session = SessionLocal()
+    
+    try:
+        responses = session.query(Response).filter_by(poll_id=poll_id).all()
+        return responses
+    finally:
+        if manage_session:
+            session.close()
 
 def get_poll_setting(poll_id: int, create: bool = False, session: Optional[Session] = None) -> Optional[PollSetting]:
     """Retrieves settings for a specific poll."""

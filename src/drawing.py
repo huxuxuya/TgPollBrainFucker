@@ -53,12 +53,12 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
         session = db.SessionLocal()
 
     try:
-        poll = db.get_poll(poll_id, session=session)
+        poll = db.get_poll(poll_id)
         if not poll:
             raise ValueError("Poll not found")
 
         participants = db.get_participants(poll.chat_id, session=session)
-        responses = db.get_responses(poll_id, session=session)
+        responses = db.get_responses(poll_id)
         
         # Determine poll options, dynamically for web apps.
         if poll.poll_type == 'native' and poll.options:
