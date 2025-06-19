@@ -6,7 +6,8 @@ import asyncio
 
 from src import database as db
 from src.config import logger, WEB_URL
-from src.display import generate_poll_text, generate_nudge_text
+from src.display import generate_poll_content
+from src.drawing import generate_results_heatmap_image
 
 async def show_draft_poll_menu(context: ContextTypes.DEFAULT_TYPE, poll_id: int, chat_id: int, message_id: int):
     """Displays the management menu for a newly created draft poll."""
@@ -16,7 +17,7 @@ async def show_draft_poll_menu(context: ContextTypes.DEFAULT_TYPE, poll_id: int,
         await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="Ошибка: созданный опрос не найден.")
         return
 
-    text = generate_poll_text(poll_id)
+    text, _ = generate_poll_content(poll_id)
     kb_rows = [
         [
             InlineKeyboardButton("▶️ Запустить", callback_data=f"dash:start_poll:{poll_id}"),
@@ -48,7 +49,7 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
         await query.edit_message_text("Опрос не найден.")
         return
 
-    text = generate_poll_text(poll_id)
+    text, _ = generate_poll_content(poll_id)
     kb_rows = []
     if poll.status == 'active':
         kb_rows.append([
@@ -196,4 +197,4 @@ async def results_callback_handler(update: Update, context: ContextTypes.DEFAULT
     elif command == "del_nudge":
         await del_nudge_handler(update, context, poll_id)
     elif command == "move_bottom":
-        await move_to_bottom_handler(update, context, poll_id) 
+        await move_to_bottom_handler(update, context, poll_id)

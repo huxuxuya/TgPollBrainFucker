@@ -1,8 +1,8 @@
 import os
 import logging
-from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Boolean, Float, Text, PrimaryKeyConstraint, ForeignKey, inspect, text
+from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Boolean, Float, Text, PrimaryKeyConstraint, ForeignKey, inspect, text, UniqueConstraint, event, select
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session, relationship
+from sqlalchemy.orm import sessionmaker, Session, relationship, Mapped
 from typing import Union, List, Optional
 from telegram.helpers import escape_markdown
 
@@ -53,14 +53,15 @@ class Participant(Base):
 
 class Poll(Base):
     __tablename__ = 'polls'
-    poll_id = Column(Integer, primary_key=True, autoincrement=True)
-    chat_id = Column(BigInteger)
-    message = Column(Text)
-    options = Column(Text)
-    status = Column(String, default='draft')
+    poll_id: Mapped[int] = Column(Integer, primary_key=True)
+    chat_id: Mapped[int] = Column(Integer, nullable=False)
+    message_id: Mapped[Optional[int]] = Column(Integer)
+    photo_file_id: Mapped[Optional[str]] = Column(String) # For storing the file_id of the heatmap image
+    message: Mapped[Optional[str]] = Column(String)
+    options: Mapped[Optional[str]] = Column(String)
+    status: Mapped[str] = Column(String, default='draft') # draft, active, closed
     poll_type = Column(String, default='native', nullable=False)
     web_app_id = Column(String, nullable=True)
-    message_id = Column(BigInteger)
     nudge_message_id = Column(BigInteger)
     
     # This relationship allows us to easily access responses via poll.responses
@@ -75,11 +76,13 @@ class Response(Base):
 class PollSetting(Base):
     __tablename__ = 'poll_settings'
     poll_id = Column(Integer, primary_key=True)
-    allow_multiple_answers = Column(Boolean, default=False, nullable=False)
-    default_show_names = Column(Integer, default=1)
+    allow_multiple_answers = Column(Boolean, default=False)
+    show_results_after_vote = Column(Boolean, default=True)
+    default_show_names = Column(Boolean, default=True)
+    default_show_count = Column(Boolean, default=True)
+    show_heatmap = Column(Boolean, default=True, nullable=False)
     default_names_style = Column(String, default='list')
     target_sum = Column(Float, default=0)
-    default_show_count = Column(Integer, default=1)
     nudge_negative_emoji = Column(String, default='❌')
 
 class PollOptionSetting(Base):

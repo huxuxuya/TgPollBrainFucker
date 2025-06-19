@@ -37,7 +37,7 @@ USER_2 = {"user_id": 102, "first_name": "Боб", "last_name": "", "username": "
 
 def test_single_choice_first_vote(db_session):
     # Arrange: Create a single-choice poll
-    poll = Poll(poll_id=1, options="A,B", status='active')
+    poll = Poll(poll_id=1, chat_id=-1001, options="A,B", status='active')
     poll_setting = PollSetting(poll_id=1, allow_multiple_answers=False)
     db_session.add_all([poll, poll_setting])
     db_session.commit()
@@ -52,7 +52,7 @@ def test_single_choice_first_vote(db_session):
 
 def test_single_choice_change_vote(db_session):
     # Arrange: Create a poll and an initial vote
-    poll = Poll(poll_id=1, options="A,B", status='active')
+    poll = Poll(poll_id=1, chat_id=-1001, options="A,B", status='active')
     poll_setting = PollSetting(poll_id=1, allow_multiple_answers=False)
     initial_response = Response(poll_id=1, user_id=USER_1['user_id'], response="A")
     db_session.add_all([poll, poll_setting, initial_response])
@@ -68,7 +68,7 @@ def test_single_choice_change_vote(db_session):
 
 def test_multiple_choice_first_vote(db_session):
     # Arrange: Create a multiple-choice poll
-    poll = Poll(poll_id=1, options="A,B,C", status='active')
+    poll = Poll(poll_id=1, chat_id=-1001, options="A,B,C", status='active')
     poll_setting = PollSetting(poll_id=1, allow_multiple_answers=True)
     db_session.add_all([poll, poll_setting])
     db_session.commit()
@@ -83,7 +83,7 @@ def test_multiple_choice_first_vote(db_session):
 
 def test_multiple_choice_second_vote(db_session):
     # Arrange: Poll where user has already voted for A
-    poll = Poll(poll_id=1, options="A,B,C", status='active')
+    poll = Poll(poll_id=1, chat_id=-1001, options="A,B,C", status='active')
     poll_setting = PollSetting(poll_id=1, allow_multiple_answers=True)
     initial_response = Response(poll_id=1, user_id=USER_1['user_id'], response="A")
     db_session.add_all([poll, poll_setting, initial_response])
@@ -100,7 +100,7 @@ def test_multiple_choice_second_vote(db_session):
 
 def test_multiple_choice_unvote(db_session):
     # Arrange: Poll where user has voted for A and C
-    poll = Poll(poll_id=1, options="A,B,C", status='active')
+    poll = Poll(poll_id=1, chat_id=-1001, options="A,B,C", status='active')
     poll_setting = PollSetting(poll_id=1, allow_multiple_answers=True)
     initial_responses = [
         Response(poll_id=1, user_id=USER_1['user_id'], response="A"),
@@ -119,7 +119,7 @@ def test_multiple_choice_unvote(db_session):
 
 def test_user_data_is_created_and_updated(db_session):
     # Arrange
-    poll = Poll(poll_id=1, options="A,B", status='active')
+    poll = Poll(poll_id=1, chat_id=-1001, options="A,B", status='active')
     poll_setting = PollSetting(poll_id=1, allow_multiple_answers=False)
     db_session.add_all([poll, poll_setting])
     db_session.commit()

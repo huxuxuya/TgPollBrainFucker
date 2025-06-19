@@ -1,4 +1,4 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, WebAppInfo, InputMediaPhoto
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
@@ -8,7 +8,7 @@ import time
 
 from src import database as db
 from src.config import logger, WEB_URL, BOT_OWNER_ID
-from src.display import generate_poll_text
+from src.display import generate_poll_content
 from src.handlers import admin
 
 async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
@@ -97,7 +97,7 @@ async def wizard_select_webapp(query: CallbackQuery, context: ContextTypes.DEFAU
 # +++ Poll Actions Handlers (called from dashboard) +++
 
 async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int):
-    """Activates a draft poll and sends it to the group."""
+    """Activates a draft poll and sends it to the group as a photo with a caption."""
     logger.info(f"Attempting to start poll_id: {poll_id}")
     session = db.SessionLocal()
     try:
@@ -125,40 +125,51 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
             await query.answer('Текст (заголовок) опроса не задан. Отредактируйте его в настройках.', show_alert=True)
             return
 
-        initial_text = "" # Will be set inside the blocks
+        caption, image_bytes = generate_poll_content(poll=poll, session=session)
         
+        # Determine keyboard
         kb = []
         if poll.poll_type == 'native':
-            initial_text = generate_poll_text(poll=poll, session=session)
-            # Consolidated, robust validation for native poll options.
+            # Validation for native poll options.
             if not poll.options or any(not opt.strip() for opt in poll.options.split(',')):
                 await query.answer('Ошибка: опрос содержит пустые или некорректные варианты ответов. Пожалуйста, отредактируйте их в настройках.', show_alert=True)
                 return
-            
             options = poll.options.split(',')
             kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
-        
         elif poll.poll_type == 'webapp':
             if not poll.web_app_id:
                 await query.answer('Ошибка: для этого опроса не задан ID веб-приложения.', show_alert=True)
                 return
-
-            # For the initial message with a web_app button, the text MUST be simple.
-            # It cannot contain entities that look like poll results. We send only the title.
-            # The full results (with counts, names, etc.) will be shown on the first update.
-            initial_text = escape_markdown(poll.message, 2)
-
             url = f"{WEB_URL}/web_apps/{poll.web_app_id}/?poll_id={poll.poll_id}"
-            # A keyboard with a WebApp button cannot be mixed with other button types.
             kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
-
+        
         # Final debug logging before sending
-        log_text = initial_text.replace('\n', ' ')
+        log_text = caption.replace('\n', ' ')
         logger.info(f"[DEBUG_START_POLL] Final text being sent: '{log_text}'")
         logger.info(f"[DEBUG_START_POLL] Keyboard object: {kb}")
         
         try:
-            msg = await context.bot.send_message(chat_id=poll.chat_id, text=initial_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+            msg = None
+            # If we have an image, send a photo.
+            if image_bytes:
+                msg = await context.bot.send_photo(
+                    chat_id=poll.chat_id,
+                    photo=image_bytes,
+                    caption=caption,
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+                if msg.photo:
+                    poll.photo_file_id = msg.photo[-1].file_id
+            # Otherwise, send a text message.
+            else:
+                msg = await context.bot.send_message(
+                    chat_id=poll.chat_id,
+                    text=caption,
+                    reply_markup=InlineKeyboardMarkup(kb),
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+
             poll.status = 'active'
             poll.message_id = msg.message_id
             session.commit()
@@ -171,7 +182,7 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
         session.close()
 
 async def close_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int):
-    """Closes an active poll, ensuring the transaction is committed."""
+    """Closes an active poll, updating the photo and caption."""
     session = db.SessionLocal()
     try:
         poll = session.query(db.Poll).filter_by(poll_id=poll_id).first()
@@ -182,29 +193,42 @@ async def close_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
 
         poll.status = 'closed'
         chat_id_for_refresh = poll.chat_id
+        session.commit() # Commit status change first
         
-        # We must commit the status change before refreshing anything.
-        session.commit()
-        await query.answer("Опрос завершён.", show_alert=True)
-        
-        # Now, generate the final text for the message in the group chat.
-        final_text = generate_poll_text(poll=poll, session=session)
+        final_caption, final_image = generate_poll_content(poll=poll, session=session)
         
         try:
-            if poll.message_id:
-                await context.bot.edit_message_text(
-                    chat_id=poll.chat_id, 
-                    message_id=poll.message_id, 
-                    text=final_text, 
-                    reply_markup=None, 
-                    parse_mode=ParseMode.MARKDOWN_V2
-                )
+            # If we have a final image (and a message to edit), update the media.
+            if poll.message_id and final_image:
+                # We need a file_id to edit media. If we don't have one (e.g., poll started as text),
+                # we must delete the old message and send a new photo.
+                if poll.photo_file_id:
+                    media = InputMediaPhoto(media=final_image, caption=final_caption, parse_mode=ParseMode.MARKDOWN_V2)
+                    await context.bot.edit_message_media(chat_id=poll.chat_id, message_id=poll.message_id, media=media, reply_markup=None)
+                else:
+                    await context.bot.delete_message(chat_id=poll.chat_id, message_id=poll.message_id)
+                    new_msg = await context.bot.send_photo(chat_id=poll.chat_id, photo=final_image, caption=final_caption, parse_mode=ParseMode.MARKDOWN_V2)
+                    poll.message_id = new_msg.message_id
+                    if new_msg.photo:
+                        poll.photo_file_id = new_msg.photo[-1].file_id
+            # If there's no final image, just edit the text.
+            elif poll.message_id:
+                 # If it was a photo, we need to delete and send text
+                if poll.photo_file_id:
+                    await context.bot.delete_message(chat_id=poll.chat_id, message_id=poll.message_id)
+                    new_msg = await context.bot.send_message(chat_id=poll.chat_id, text=final_caption, parse_mode=ParseMode.MARKDOWN_V2)
+                    poll.message_id = new_msg.message_id
+                    poll.photo_file_id = None # Important to clear this
+                # If it was already text, just edit it
+                else:
+                    await context.bot.edit_message_text(chat_id=poll.chat_id, message_id=poll.message_id, text=final_caption, reply_markup=None, parse_mode=ParseMode.MARKDOWN_V2)
+
         except telegram.error.BadRequest as e:
-            # It's okay if the message wasn't modified.
             if "Message is not modified" not in str(e):
                 logger.error(f"Could not edit final message for poll {poll_id}: {e}")
         
-        # After successfully closing, refresh the list of active polls.
+        session.commit()
+        await query.answer("Опрос завершён.", show_alert=True)
         await show_poll_list(query, chat_id_for_refresh, 'active')
 
     except Exception as e:
@@ -215,7 +239,7 @@ async def close_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
         session.close()
 
 async def reopen_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int):
-    """Reopens a closed poll."""
+    """Reopens a closed poll, updating the photo, caption, and keyboard."""
     session = db.SessionLocal()
     try:
         poll = session.query(db.Poll).filter_by(poll_id=poll_id).first()
@@ -223,11 +247,11 @@ async def reopen_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, 
             await query.answer("Этот опрос нельзя открыть заново.", show_alert=True)
             return
 
-        # Change status
         poll.status = 'active'
+        # No need to commit here, it will be committed after the message is successfully sent/edited
+
+        new_caption, new_image = generate_poll_content(poll=poll, session=session)
         
-        # Regenerate the poll message with buttons
-        new_text = generate_poll_text(poll=poll, session=session)
         kb = []
         if poll.poll_type == 'native':
             options = poll.options.split(',')
@@ -239,29 +263,47 @@ async def reopen_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, 
                 return
             url = f"{WEB_URL}/web_apps/{poll.web_app_id}/?poll_id={poll.poll_id}"
             kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]
+        
+        reply_markup = InlineKeyboardMarkup(kb)
 
         try:
-            if poll.message_id:
-                await context.bot.edit_message_text(
-                    chat_id=poll.chat_id,
-                    message_id=poll.message_id,
-                    text=new_text,
-                    reply_markup=InlineKeyboardMarkup(kb),
-                    parse_mode=ParseMode.MARKDOWN_V2
-                )
+            if not poll.message_id:
+                # This case shouldn't happen for a closed poll, but as a fallback
+                msg = await context.bot.send_message(chat_id=poll.chat_id, text=new_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
+                poll.message_id = msg.message_id
+            # If we have a new image to show
+            elif new_image:
+                # If it was already a photo, edit it
+                if poll.photo_file_id:
+                    media = InputMediaPhoto(media=new_image, caption=new_caption, parse_mode=ParseMode.MARKDOWN_V2)
+                    await context.bot.edit_message_media(chat_id=poll.chat_id, message_id=poll.message_id, media=media, reply_markup=reply_markup)
+                # If it was text, delete and send a new photo
+                else:
+                    await context.bot.delete_message(chat_id=poll.chat_id, message_id=poll.message_id)
+                    new_msg = await context.bot.send_photo(chat_id=poll.chat_id, photo=new_image, caption=new_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
+                    poll.message_id = new_msg.message_id
+                    if new_msg.photo:
+                        poll.photo_file_id = new_msg.photo[-1].file_id
+            # If we are going from photo to text or text to text
+            else:
+                # If it was a photo, delete and send text
+                if poll.photo_file_id:
+                    await context.bot.delete_message(chat_id=poll.chat_id, message_id=poll.message_id)
+                    new_msg = await context.bot.send_message(chat_id=poll.chat_id, text=new_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
+                    poll.message_id = new_msg.message_id
+                    poll.photo_file_id = None # Important to clear this
+                # If it was already text, just edit it
+                else:
+                    await context.bot.edit_message_text(chat_id=poll.chat_id, message_id=poll.message_id, text=new_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
+
+            session.commit()
+            await query.answer("Опрос снова открыт.", show_alert=True)
+            await show_poll_list(query, poll.chat_id, 'closed')
         except Exception as e:
             logger.error(f"Failed to edit message when reopening poll {poll_id}: {e}")
             await query.answer("Опрос открыт, но не удалось обновить сообщение в чате.", show_alert=True)
-            # Rollback status change if message edit fails
             session.rollback()
             return
-        
-        # Commit only after the message has been successfully edited
-        session.commit()
-        await query.answer("Опрос снова открыт.", show_alert=True)
-        
-        # After reopening, show the list of closed polls, where this one will be gone.
-        await show_poll_list(query, poll.chat_id, 'closed')
 
     except Exception as e:
         logger.error(f"An unexpected error occurred while reopening poll {poll_id}: {e}")
@@ -272,17 +314,20 @@ async def reopen_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, 
 
 async def delete_poll(query: CallbackQuery, poll_id: int):
     """Deletes a poll and all associated data."""
-    poll = db.get_poll(poll_id)
-    if poll:
-        chat_id, status = poll.chat_id, poll.status
-        db.delete_responses_for_poll(poll_id)
-        db.delete_poll_setting(poll_id)
-        db.delete_poll_option_settings(poll_id)
-        db.delete_poll(poll)
-        await query.answer(f"Опрос {poll_id} удален.", show_alert=True)
-        await show_poll_list(query, chat_id, status)
-    else:
-        await query.answer("Опрос не найден.", show_alert=True)
+    session = db.SessionLocal()
+    try:
+        poll = session.query(db.Poll).filter_by(poll_id=poll_id).first()
+        if poll:
+            chat_id, status = poll.chat_id, poll.status
+            # Cascade delete is configured in the model, so this should be enough
+            session.delete(poll)
+            session.commit()
+            await query.answer(f"Опрос {poll_id} удален.", show_alert=True)
+            await show_poll_list(query, chat_id, status)
+        else:
+            await query.answer("Опрос не найден.", show_alert=True)
+    finally:
+        session.close()
 
 
 async def check_admin_in_chat(user_id: int, chat: db.KnownChat, context: ContextTypes.DEFAULT_TYPE, semaphore: asyncio.Semaphore):
@@ -308,9 +353,13 @@ async def check_admin_in_chat(user_id: int, chat: db.KnownChat, context: Context
                     return {'id': chat.chat_id, 'title': chat.title}
 
                 # --- Fallback Check: Has the user created any polls in this chat? ---
-                if db.has_user_created_poll_in_chat(user_id, chat.chat_id):
-                    logger.info(f"SUCCESS (Creator): User {user_id} is not an admin but created a poll in chat {chat.chat_id}.")
-                    return {'id': chat.chat_id, 'title': chat.title}
+                session = db.SessionLocal()
+                try:
+                    if db.has_user_created_poll_in_chat(session, user_id, chat.chat_id):
+                        logger.info(f"SUCCESS (Creator): User {user_id} is not an admin but created a poll in chat {chat.chat_id}.")
+                        return {'id': chat.chat_id, 'title': chat.title}
+                finally:
+                    session.close()
 
                 # If neither check passes, log for diagnostics.
                 logger.warning(
@@ -386,39 +435,43 @@ async def show_group_dashboard(query: CallbackQuery, context: ContextTypes.DEFAU
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.MARKDOWN_V2)
 
 async def show_poll_list(query: CallbackQuery, chat_id: int, status: str):
-    polls = db.get_polls_by_status(chat_id, status)
-    status_text_map = {'active': 'активных опросов', 'draft': 'черновиков', 'closed': 'завершённых опросов'}
-    text_part = status_text_map.get(status, f'{status} опросов')
+    session = db.SessionLocal()
+    try:
+        polls = db.get_polls_by_status(session, chat_id, status)
+        status_text_map = {'active': 'активных опросов', 'draft': 'черновиков', 'closed': 'завершённых опросов'}
+        text_part = status_text_map.get(status, f'{status} опросов')
 
-    if not polls:
-        text = f"Нет {text_part} в этой группе."
-        kb = [[InlineKeyboardButton("↩️ Назад", callback_data=f"dash:group:{chat_id}")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
-        return
+        if not polls:
+            text = f"Нет {text_part} в этой группе."
+            kb = [[InlineKeyboardButton("↩️ Назад", callback_data=f"dash:group:{chat_id}")]]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
+            return
 
-    title_map = {'active': 'Активные опросы', 'draft': 'Черновики', 'closed': 'Завершённые опросы'}
-    text = f'*{title_map.get(status, status.capitalize())}*:'
-    kb = []
-    for poll in polls:
-        msg = (poll.message or f'Опрос {poll.poll_id}')[:40]
-        # Common delete button for closed and draft polls
-        delete_button = InlineKeyboardButton("🗑", callback_data=f"dash:delete_poll_confirm:{poll.poll_id}")
-        
-        if status == 'active': 
-            kb.append([InlineKeyboardButton(msg, callback_data=f"results:show:{poll.poll_id}")])
-        elif status == 'draft': 
-            kb.append([
-                InlineKeyboardButton(f"✏️ {msg}", callback_data=f"settings:poll_menu:{poll.poll_id}"), 
-                InlineKeyboardButton("▶️", callback_data=f"dash:start_poll:{poll.poll_id}"), 
-                delete_button
-            ])
-        elif status == 'closed': 
-            kb.append([
-                InlineKeyboardButton(f"📊 {msg}", callback_data=f"results:show:{poll.poll_id}"), 
-                delete_button
-            ])
-    kb.append([InlineKeyboardButton("↩️ Назад", callback_data=f"dash:group:{chat_id}")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+        title_map = {'active': 'Активные опросы', 'draft': 'Черновики', 'closed': 'Завершённые опросы'}
+        text = f'*{title_map.get(status, status.capitalize())}*:'
+        kb = []
+        for poll in polls:
+            msg = (poll.message or f'Опрос {poll.poll_id}')[:40]
+            # Common delete button for closed and draft polls
+            delete_button = InlineKeyboardButton("🗑", callback_data=f"dash:delete_poll_confirm:{poll.poll_id}")
+            
+            if status == 'active': 
+                kb.append([InlineKeyboardButton(msg, callback_data=f"results:show:{poll.poll_id}")])
+            elif status == 'draft': 
+                kb.append([
+                    InlineKeyboardButton(f"✏️ {msg}", callback_data=f"settings:poll_menu:{poll.poll_id}"), 
+                    InlineKeyboardButton("▶️", callback_data=f"dash:start_poll:{poll.poll_id}"), 
+                    delete_button
+                ])
+            elif status == 'closed': 
+                kb.append([
+                    InlineKeyboardButton(f"📊 {msg}", callback_data=f"results:show:{poll.poll_id}"), 
+                    delete_button
+                ])
+        kb.append([InlineKeyboardButton("↩️ Назад", callback_data=f"dash:group:{chat_id}")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+    finally:
+        session.close()
 
 async def show_participants_menu(query: CallbackQuery, chat_id: int):
     title = escape_markdown(db.get_group_title(chat_id), 2)
@@ -436,7 +489,7 @@ async def show_participants_list(query: CallbackQuery, chat_id: int, page: int =
     """Displays a paginated list of group participants."""
     session = db.SessionLocal()
     try:
-        participants = db.get_participants(chat_id)
+        participants = db.get_participants(session, chat_id)
         title = escape_markdown(db.get_group_title(chat_id), 2)
 
         if not participants:
@@ -471,7 +524,6 @@ async def show_participants_list(query: CallbackQuery, chat_id: int, page: int =
         kb_rows.append([InlineKeyboardButton("↩️ В меню", callback_data=f"dash:participants_menu:{chat_id}")])
         
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb_rows), parse_mode=ParseMode.MARKDOWN_V2)
-        session.commit()
     finally:
         session.close()
 
@@ -479,7 +531,7 @@ async def show_exclude_menu(query: CallbackQuery, chat_id: int, page: int = 0):
     """Displays a paginated menu to exclude/include participants."""
     session = db.SessionLocal()
     try:
-        participants = db.get_participants(chat_id)
+        participants = db.get_participants(session, chat_id)
         title = escape_markdown(db.get_group_title(chat_id), 2)
 
         if not participants:
@@ -510,25 +562,33 @@ async def show_exclude_menu(query: CallbackQuery, chat_id: int, page: int = 0):
         kb.append([InlineKeyboardButton("↩️ Назад", callback_data=f"dash:participants_menu:{chat_id}")])
         
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
-        session.commit()
     finally:
         session.close()
 
 async def toggle_exclude_participant(query: CallbackQuery, chat_id: int, user_id: int, page: int):
     """Toggles the 'excluded' status for a participant."""
-    participant = db.get_participant(chat_id, user_id)
-    if participant:
-        participant.excluded = 1 - (participant.excluded or 0)
-        db.commit_session()
-        await show_exclude_menu(query, chat_id, page)
-    else:
-        await query.answer("Участник не найден.", show_alert=True)
+    session = db.SessionLocal()
+    try:
+        participant = db.get_participant(session, chat_id, user_id)
+        if participant:
+            participant.excluded = not participant.excluded
+            session.commit()
+            await show_exclude_menu(query, chat_id, page)
+        else:
+            await query.answer("Участник не найден.", show_alert=True)
+    finally:
+        session.close()
 
 async def clean_participants(query: CallbackQuery, chat_id: int):
     """Deletes all participants from a chat."""
-    db.delete_participants(chat_id)
-    await query.answer(f'Список участников для "{db.get_group_title(chat_id)}" очищен.', show_alert=True)
-    await show_participants_menu(query, chat_id)
+    session = db.SessionLocal()
+    try:
+        db.delete_participants(session, chat_id)
+        session.commit()
+        await query.answer(f'Список участников для "{db.get_group_title(chat_id)}" очищен.', show_alert=True)
+        await show_participants_menu(query, chat_id)
+    finally:
+        session.close()
 
 async def add_user_via_forward_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     """Puts the bot in a state to wait for a forwarded message."""
@@ -541,16 +601,20 @@ async def add_user_via_forward_start(query: CallbackQuery, context: ContextTypes
 
 async def delete_poll_confirm(query: CallbackQuery, poll_id: int):
     """Asks for confirmation before deleting a poll."""
-    poll = db.get_poll(poll_id)
-    if not poll:
-        await query.answer("Опрос уже удален.", show_alert=True)
-        return
-    text = f"Вы уверены, что хотите удалить опрос «{escape_markdown(poll.message or str(poll_id), 2)}»? Это действие необратимо\\."
-    kb = [[
-        InlineKeyboardButton("✅ Да, удалить", callback_data=f"dash:delete_poll_execute:{poll_id}"),
-        InlineKeyboardButton("❌ Нет, отмена", callback_data=f"dash:polls:{poll.chat_id}:{poll.status}")
-    ]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+    session = db.SessionLocal()
+    try:
+        poll = session.query(db.Poll).filter_by(poll_id=poll_id).first()
+        if not poll:
+            await query.answer("Опрос уже удален.", show_alert=True)
+            return
+        text = f"Вы уверены, что хотите удалить опрос «{escape_markdown(poll.message or str(poll.poll_id), 2)}»? Это действие необратимо\\."
+        kb = [[
+            InlineKeyboardButton("✅ Да, удалить", callback_data=f"dash:delete_poll_execute:{poll_id}"),
+            InlineKeyboardButton("❌ Нет, отмена", callback_data=f"dash:polls:{poll.chat_id}:{poll.status}")
+        ]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+    finally:
+        session.close()
 
 async def delete_poll_execute(query: CallbackQuery, poll_id: int):
     """Deletes a poll after confirmation."""

@@ -1,8 +1,10 @@
 import re
+import io
 from telegram.helpers import escape_markdown
 from . import database as db
 from .config import logger
-from typing import Optional
+from .drawing import generate_results_heatmap_image
+from typing import Optional, Tuple
 from sqlalchemy.orm import Session
 
 def get_progress_bar(progress, total, length=20):
@@ -12,12 +14,13 @@ def get_progress_bar(progress, total, length=20):
     bar = '█' * filled_length + '░' * (length - filled_length)
     return f"\\[{bar}\\]", percent * 100
 
-def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, session: Optional[Session] = None) -> str:
-    """Generates the text to display for a poll, including results."""
-    
-    # If a session is not provided, we must create and manage our own.
-    # This is the "session-aware" flag.
+def generate_poll_content(poll_id: int = None, poll: Optional[db.Poll] = None, session: Optional[Session] = None) -> Tuple[str, Optional[io.BytesIO]]:
+    """
+    Generates the text caption and heatmap image for a poll.
+    Returns a tuple: (text, image_bytes)
+    """
     manage_session = session is None
+    image_bytes = None
 
     try:
         if manage_session:
@@ -32,7 +35,8 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
             poll = session.merge(poll)
         
         if not poll:
-            return "Опрос не найден."
+            logger.error(f"generate_poll_content: Poll with ID {poll_id} not found.")
+            return "Опрос не найден.", None
         
         # Ensure poll_id is set for other functions that might need it.
         if poll_id is None:
@@ -166,13 +170,24 @@ def generate_poll_text(poll_id: int = None, poll: Optional[db.Poll] = None, sess
         text_parts.append(f"\nВсего проголосовало: *{total_voters}*")
         final_text = "\n".join(text_parts)
         
+        # --- Image Generation ---
+        show_heatmap = poll_setting.show_heatmap if poll_setting is not None else True
+        image_bytes = None
+        # Generate heatmap only if there are votes and the setting is enabled
+        if responses and show_heatmap:
+            image_bytes = generate_results_heatmap_image(
+                options=display_options,
+                responses=responses,
+                session=session
+            )
+        
         # We only commit if we created the session inside this function.
         # The calling function is responsible for committing if it passed its own session.
         if manage_session:
             session.commit()
         
         logger.info(f"[DEBUG] Final poll text for poll {poll_id}:\n{final_text}")
-        return final_text
+        return final_text, image_bytes
     finally:
         # Only close the session if we created it here.
         if manage_session and session:

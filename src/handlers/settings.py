@@ -99,8 +99,9 @@ async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: Co
     multiple_answers = poll_setting.allow_multiple_answers
 
     title = poll.message or f"Опрос {poll.poll_id}"
-    text = f"⚙️ *Общие настройки опроса: «{title}»*\n\n" \
-           f"Несколько ответов: {'Да' if multiple_answers else 'Нет'}"
+    text = f"⚙️ *Общие настройки опроса: «{escape_markdown(title, 2)}»*\n\n" \
+           f"Несколько ответов: {'Да' if multiple_answers else 'Нет'}\n" \
+           f"Показывать тепловую карту: {'Да' if poll_setting.show_heatmap else 'Нет'}"
 
     kb = [
         [
@@ -108,6 +109,7 @@ async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: Co
             InlineKeyboardButton("📝 Варианты", callback_data=f"settings:ask_text:{poll_id}:options")
         ],
         [InlineKeyboardButton(f"Несколько ответов: {'✅' if multiple_answers else '❌'}", callback_data=f"settings:toggle_setting:{poll_id}:allow_multiple_answers")],
+        [InlineKeyboardButton(f"Тепловая карта: {'✅' if poll_setting.show_heatmap else '❌'}", callback_data=f"settings:toggle_setting:{poll_id}:show_heatmap")],
         [InlineKeyboardButton("⚙️ Настроить варианты ответов", callback_data=f"settings:poll_options_menu:{poll_id}")],
         [InlineKeyboardButton("📢 Эмодзи для напоминаний", callback_data=f"settings:ask_text:{poll_id}:nudge_negative_emoji")],
         [InlineKeyboardButton("↩️ К результатам/списку", callback_data=f"results:show:{poll.poll_id}")]
@@ -247,9 +249,12 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
 def toggle_boolean_setting(poll_id: int, setting_key: str):
     """Toggles a boolean setting for a poll."""
     setting = db.get_poll_setting(poll_id, create=True)
-    current_value = getattr(setting, setting_key, False)
-    setattr(setting, setting_key, not current_value)
-    db.commit_session()
+    if hasattr(setting, setting_key):
+        current_value = getattr(setting, setting_key, False)
+        setattr(setting, setting_key, not current_value)
+        db.commit_session()
+    else:
+        logger.warning(f"Attempted to toggle non-existent setting '{setting_key}' on poll {poll_id}")
 
 def toggle_boolean_option_setting(poll_id: int, option_index: int, setting_key: str):
     """Toggles a boolean setting for a specific poll option."""
