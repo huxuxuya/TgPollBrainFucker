@@ -98,7 +98,6 @@ class PollOptionSetting(Base):
     show_contribution = Column(Integer, default=1)
 
 # --- Новая таблица: исключения участников для конкретного опроса ----------
-
 class PollExclusion(Base):
     """Содержит пары (poll_id, user_id) для участников, исключённых только из
     данного опроса. Если записи нет, участник считается включённым.
@@ -108,80 +107,49 @@ class PollExclusion(Base):
     user_id = Column(BigInteger, primary_key=True)
 
 
-def init_database():
-    """Initialize database connection and ensure Alembic migrations are up to date"""
-    try:
-        # Attempt to upgrade to the latest version
-        import subprocess
-        subprocess.run(['alembic', 'upgrade', 'head'])
-    except Exception as e:
-        logger.error(f"Failed to run Alembic upgrade: {e}")
-        raise RuntimeError("Failed to initialize database. Please run 'alembic upgrade head' manually.")
-
-
+# --- Database migrations ---
 def run_migrations():
-    """
-    This function is deprecated. Use Alembic for database migrations:
-    
-    Initialize database: alembic upgrade head
-    Migrate between SQLite and PostgreSQL: alembic upgrade sqlite_to_postgres
-    
-    Note: This function is kept for backwards compatibility but should not be used directly.
-    """
-    logger.warning("run_migrations() is deprecated. Use Alembic directly instead.")
-    raise RuntimeError("Database migrations should be handled by Alembic. "
-                      "Run 'alembic upgrade head' to initialize the database.")
-
-# --- Новая таблица: исключения участников для конкретного опроса ----------
-# Содержит пары (poll_id, user_id) для участников, исключённых только из
-# данного опроса. Если записи нет, участник считается включённым.
-class PollExclusion(Base):
-    __tablename__ = 'poll_exclusions'
-    poll_id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger, primary_key=True)
-
+    """Run database migrations when needed."""
     try:
+        inspector = inspect(engine)
         with engine.connect() as connection:
-            # Use VARCHAR without a length for PostgreSQL, which maps to `text`.
-            # For SQLite, it will also work.
-            connection.execute(text('ALTER TABLE polls ADD COLUMN web_app_id VARCHAR'))
-            # For SQLAlchemy 2.0 style with Connection, commit is often needed for DDL
-            if connection.engine.dialect.name != 'sqlite':
-                connection.commit()
-        logger.info("MIGRATION: Successfully added 'web_app_id' column.")
-    except Exception as e:
-        logger.error(f"MIGRATION FAILED for 'web_app_id': {e}")
+            # Add web_app_id column if it doesn't exist
+            if not inspector.has_table("polls") or not any(c.name == 'web_app_id' for c in inspector.get_columns('polls')):
+                connection.execute(text('ALTER TABLE polls ADD COLUMN web_app_id VARCHAR'))
+                if connection.engine.dialect.name != 'sqlite':
+                    connection.commit()
+                logger.info("MIGRATION: Successfully added 'web_app_id' column.")
 
-        # --- Migration 2: Remove the now-obsolete web_apps table ---
-        if inspector.has_table("web_apps"):
-            logger.info("MIGRATION: Obsolete 'web_apps' table found. Removing it.")
-            try:
-                with engine.connect() as connection:
-                    connection.execute(text('DROP TABLE web_apps'))
-                    if connection.engine.dialect.name != 'sqlite':
-                        connection.commit()
+            # Remove obsolete web_apps table if it exists
+            if inspector.has_table("web_apps"):
+                logger.info("MIGRATION: Obsolete 'web_apps' table found. Removing it.")
+                connection.execute(text('DROP TABLE web_apps'))
+                if connection.engine.dialect.name != 'sqlite':
+                    connection.commit()
                 logger.info("MIGRATION: Successfully dropped 'web_apps' table.")
-            except Exception as e:
-                logger.error(f"MIGRATION FAILED for dropping 'web_apps' table: {e}")
-                try:
-                    # Attempt to roll back the migration
-                    connection.rollback()
-                except Exception as rollback_e:
-                    logger.error(f"Failed to roll back migration: {rollback_e}")
 
-        # --- Migration 3: Fix responses table primary key for multiple selections ---
-        if 'responses' in inspector.get_table_names():
-            logger.info("MIGRATION: Checking responses table primary key...")
-            try:
-                # No specific migration needed for multiple selections yet
-                pass
-            except Exception as e:
-                logger.error(f"MIGRATION FAILED for responses table: {e}")
+            # --- Migration 3: Fix responses table primary key for multiple selections ---
+            if 'responses' in inspector.get_table_names():
+                logger.info("MIGRATION: Checking responses table primary key...")
                 try:
-                    # Attempt to roll back the migration
-                    connection.rollback()
-                except Exception as rollback_e:
-                    logger.error(f"Failed to roll back migration: {rollback_e}")
+                    # No specific migration needed for multiple selections yet
+                    pass
+                except Exception as e:
+                    logger.error(f"MIGRATION FAILED for responses table: {e}")
+                    try:
+                        # Attempt to roll back the migration
+                        connection.rollback()
+                    except Exception as rollback_e:
+                        logger.error(f"Failed to roll back migration: {rollback_e}")
+
+    except Exception as e:
+        logger.error(f"MIGRATION FAILED: {e}")
+
+# Initialize database connection and ensure Alembic migrations are up to date
+def init_database():
+    """Initialize database connection and ensure migrations are run."""
+    Base.metadata.create_all(engine)
+    run_migrations()
 
 
 def update_user(session: Session, user_id: int, first_name: str, last_name: str, username: str = None):

@@ -13,7 +13,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
-from src.database import Base, User, KnownChat, Participant, Poll, WebApp, Response, PollSetting, PollOptionSetting
+from src.database import Base, User, KnownChat, Participant, Poll, Response, PollSetting, PollOptionSetting
 
 # revision identifiers, used by Alembic.
 revision: str = 'sqlite_to_postgres'

@@ -78,7 +78,7 @@ def test_heatmap_generation_no_participants(mock_db):
     poll = Poll(poll_id=2, chat_id=-101, poll_type='native', options="A,B")
     mock_db.get_poll.return_value = poll
     mock_db.get_participants.return_value = [] # No participants
-    mock_db.get_responses.return_value = [Response(user_id=1, response="A")]
+    mock_db.get_responses.return_value = [] # To truly test no participants, there should be no responses either
 
     # Act
     image_buffer = generate_results_heatmap_image(poll_id=2)

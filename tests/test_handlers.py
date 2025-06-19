@@ -234,29 +234,27 @@ async def test_start_poll_fail_no_native_options(mock_session_local, mock_contex
     mock_query.answer.assert_called_once_with('Ошибка: опрос содержит пустые или некорректные варианты ответов. Пожалуйста, отредактируйте их в настройках.', show_alert=True)
 
 @pytest.mark.asyncio
+@patch('src.handlers.voting.db.add_user_to_participants')
 @patch('src.handlers.voting.db.SessionLocal')
-@patch('src.handlers.voting.db.add_or_update_response_ext')
+@patch('src.handlers.voting.db.add_or_update_response')
 @patch('src.handlers.voting.generate_poll_content')
 async def test_vote_callback_handler_calls_db_correctly(
-    mock_generate_content, mock_add_response, mock_session_local
+    mock_generate_content, mock_add_response, mock_session_local, mock_add_participant
 ):
     """
     Tests that the vote handler correctly processes a vote, fetches poll settings,
     and calls the database function with the correct parameters.
+    This test is corrected to align with the actual implementation.
     """
     # --- Arrange ---
     # 1. Mock the database session and the objects it returns
     mock_session = MagicMock()
     mock_session_local.return_value = mock_session
     
-    mock_poll = Poll(poll_id=42, chat_id=-1001, status='active', options="Да,Нет")
-    mock_poll_settings = PollSetting(poll_id=42, allow_multiple_answers=False)
+    mock_poll = Poll(poll_id=42, chat_id=-1001, message_id=999, status='active', options="Да,Нет")
     
-    # Configure the mock query to return the right objects
-    mock_session.query.return_value.filter_by.side_effect = [
-        MagicMock(first=lambda: mock_poll),
-        MagicMock(first=lambda: mock_poll_settings)
-    ]
+    # Configure the mock query to return the poll object.
+    mock_session.query.return_value.filter_by.return_value.first.return_value = mock_poll
 
     # 2. Mock the Telegram Update object
     mock_user = User(id=123, first_name="Тест", is_bot=False, last_name="Тестов", username="test_user")
@@ -268,8 +266,10 @@ async def test_vote_callback_handler_calls_db_correctly(
     
     mock_update = MagicMock(spec=Update)
     mock_update.callback_query = mock_query
+    mock_update.effective_chat.id = -1001
 
     mock_context = MagicMock(spec=ContextTypes.DEFAULT_TYPE)
+    mock_context.bot = AsyncMock()
     
     # Mock the return value for content generation
     mock_generate_content.return_value = ("New Caption", None)
@@ -278,23 +278,33 @@ async def test_vote_callback_handler_calls_db_correctly(
     await voting.vote_callback_handler(mock_update, mock_context)
 
     # --- Assert ---
-    # 1. Check that the DB function was called correctly
-    mock_add_response.assert_called_once()
-    call_args, call_kwargs = mock_add_response.call_args
-    
-    assert call_kwargs['session'] == mock_session
-    assert call_kwargs['poll_id'] == 42
-    assert call_kwargs['user_id'] == 123
-    assert call_kwargs['first_name'] == "Тест"
-    assert call_kwargs['last_name'] == "Тестов"
-    assert call_kwargs['username'] == "test_user"
-    assert call_kwargs['option_index'] == 0
+    # 1. Check that participant was added
+    mock_add_participant.assert_called_once_with(
+        chat_id=-1001,
+        user_id=123,
+        username="test_user",
+        first_name="Тест",
+        last_name="Тестов",
+    )
 
-    # 2. Check that the session was committed
-    mock_session.commit.assert_called()
+    # 2. Check that the response was added/updated
+    mock_add_response.assert_called_once_with(
+        poll_id=42,
+        user_id=123,
+        first_name="Тест",
+        last_name="Тестов",
+        username="test_user",
+        option_index=0
+    )
 
-    # 3. Check that the user gets a confirmation
-    mock_query.answer.assert_called()
+    # 3. Check that the session was committed inside update_poll_message
+    mock_session.commit.assert_called_once()
+
+    # 4. Check that the user gets a confirmation
+    mock_query.answer.assert_called_once_with("Спасибо, ваш голос учтён!")
+
+    # 5. Check that the poll message is updated
+    mock_context.bot.edit_message_text.assert_called_once()
 
 # --- NEW TESTS FOR HEATMAP DISPLAY IN show_results ---
 
