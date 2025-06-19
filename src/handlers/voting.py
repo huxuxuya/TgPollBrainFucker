@@ -41,39 +41,17 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
         reply_markup = InlineKeyboardMarkup(kb) if kb else None
 
         try:
-            # Case 1: We have an image to display.
-            if new_image:
+            if new_image and poll.photo_file_id:
+                # обновляем само изображение
                 media = InputMediaPhoto(media=new_image, caption=new_caption, parse_mode=ParseMode.MARKDOWN_V2)
-                if poll.photo_file_id:
-                    await context.bot.edit_message_media(chat_id=poll.chat_id, message_id=poll.message_id, media=media, reply_markup=reply_markup)
-                else:
-                    try:
-                        await context.bot.delete_message(chat_id=poll.chat_id, message_id=poll.message_id)
-                    except BadRequest as e:
-                        if DELETE_ERROR_PHRASE not in str(e):
-                            raise
-                        # Нельзя удалить — просто оставляем старое сообщение и отправим новое.
-                        logger.warning(f"Couldn't delete old message {poll.message_id}: {e}")
-                    new_msg = await context.bot.send_photo(chat_id=poll.chat_id, photo=new_image, caption=new_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
-                    poll.message_id = new_msg.message_id
-                    if new_msg.photo:
-                        poll.photo_file_id = new_msg.photo[-1].file_id
-
-            # Case 2: We don't have an image.
+                await context.bot.edit_message_media(chat_id=poll.chat_id, message_id=poll.message_id, media=media, reply_markup=reply_markup)
+            elif poll.photo_file_id:
+                # есть фото, но мы не обновляем его – меняем подпись
+                await context.bot.edit_message_caption(chat_id=poll.chat_id, message_id=poll.message_id, caption=new_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
             else:
-                if poll.photo_file_id:
-                    try:
-                        await context.bot.delete_message(chat_id=poll.chat_id, message_id=poll.message_id)
-                    except BadRequest as e:
-                        if DELETE_ERROR_PHRASE not in str(e):
-                            raise
-                        logger.warning(f"Couldn't delete old photo message {poll.message_id}: {e}")
-                    new_msg = await context.bot.send_message(chat_id=poll.chat_id, text=new_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
-                    poll.message_id = new_msg.message_id
-                    poll.photo_file_id = None
-                else:
-                    await context.bot.edit_message_text(text=new_caption, chat_id=poll.chat_id, message_id=poll.message_id, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
-            
+                # обычное текстовое сообщение
+                await context.bot.edit_message_text(text=new_caption, chat_id=poll.chat_id, message_id=poll.message_id, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
+
             session.commit()
 
         except BadRequest as e:
