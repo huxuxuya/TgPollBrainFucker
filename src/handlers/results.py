@@ -182,7 +182,8 @@ async def move_to_bottom_handler(update: Update, context: ContextTypes.DEFAULT_T
         except Exception as e:
             logger.warning(f"Couldn't delete old poll message {poll.message_id}: {e}")
 
-        new_text = generate_poll_text(poll=poll, session=session)
+        # Сгенерируем новый текст опроса (изображение для сообщения опроса не нужно)
+        new_text, _ = generate_poll_content(poll=poll, session=session)
         kb = []
         if poll.poll_type == 'native':
             options = poll.options.split(',')
