@@ -1,6 +1,6 @@
 import pytest
 import io
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 from PIL import Image
 
 from src.drawing import generate_results_heatmap_image
@@ -58,7 +58,13 @@ def test_heatmap_generation_with_internal_session(mock_db, mock_session_local):
     # get_participants and get_user_name should be called with the session
     # that was created inside generate_results_heatmap_image.
     mock_db.get_participants.assert_called_once_with(-100, session=mock_internal_session)
-    mock_db.get_user_name.assert_called_with(mock_internal_session, 101)
+    
+    # Assert that get_user_name was called for both the active and the excluded participant
+    expected_calls = [
+        call(mock_internal_session, 101),
+        call(mock_internal_session, 102)
+    ]
+    mock_db.get_user_name.assert_has_calls(expected_calls, any_order=True)
     
     # Check that the internal session was closed.
     mock_internal_session.close.assert_called_once()
