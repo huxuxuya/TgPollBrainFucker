@@ -5,6 +5,7 @@ from telegram.helpers import escape_markdown
 from typing import Union
 from telegram.error import BadRequest
 import asyncio
+import math
 
 from src import database as db
 from src.config import logger
@@ -111,6 +112,7 @@ async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: Co
         [InlineKeyboardButton(f"Тепловая карта: {'✅' if poll_setting.show_heatmap else '❌'}", callback_data=f"settings:toggle_setting:{poll_id}:show_heatmap")],
         [InlineKeyboardButton("⚙️ Настроить варианты ответов", callback_data=f"settings:poll_options_menu:{poll_id}")],
         [InlineKeyboardButton("📢 Эмодзи для напоминаний", callback_data=f"settings:ask_text:{poll_id}:nudge_negative_emoji")],
+        [InlineKeyboardButton("🚫 Исключить участников", callback_data=f"settings:excl_menu:{poll_id}:0")],
         [InlineKeyboardButton("↩️ К результатам/списку", callback_data=f"results:show:{poll.poll_id}")]
     ]
     
@@ -239,6 +241,13 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
         setting_key = parts[3]
         toggle_boolean_setting(poll_id, setting_key)
         await show_poll_settings_menu(query, context, poll_id)
+    elif command == "excl_menu":
+        page = int(parts[3])
+        await show_poll_exclusion_menu(query, context, poll_id, page)
+    elif command == "toggle_excl":
+        user_id = int(parts[3])
+        page = int(parts[4])
+        await toggle_exclude_in_poll(query, context, poll_id, user_id, page)
     elif command == "toggle_option_setting":
         option_index = int(parts[3])
         setting_key = parts[4]
@@ -271,4 +280,56 @@ def toggle_boolean_option_setting(poll_id: int, option_index: int, setting_key: 
         current_value = 1 if current_value is None else current_value
         setattr(option_setting, setting_key, 1 - current_value)
 
-    db.commit_session(option_setting) 
+    db.commit_session(option_setting)
+
+async def show_poll_exclusion_menu(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int, page: int = 0):
+    """Показывает список участников чата с возможностью исключения из опроса."""
+    PAGE_SIZE = 20
+
+    poll = db.get_poll(poll_id)
+    if not poll:
+        await query.answer("Опрос не найден.", show_alert=True)
+        return
+
+    session = db.SessionLocal()
+    try:
+        participants = db.get_participants(poll.chat_id, session=session)
+        excluded_ids = db.get_poll_exclusions(poll_id, session=session)
+
+        total_pages = max(1, math.ceil(len(participants) / PAGE_SIZE))
+        page = max(0, min(page, total_pages - 1))
+
+        start = page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        page_participants = participants[start:end]
+
+        text_lines = ["*Исключение участников из опроса:*", f"Стр. {page+1}/{total_pages}", ""]
+        kb_rows = []
+        for p in page_participants:
+            name = db.get_user_name(session, p.user_id, markdown_link=True)
+            is_exc = p.user_id in excluded_ids
+            icon = "🚫" if is_exc else "✅"
+            text_lines.append(f"{icon} {name}")
+            kb_rows.append([InlineKeyboardButton(icon, callback_data=f"settings:toggle_excl:{poll_id}:{p.user_id}:{page}")])
+
+        # Навигация
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("⬅️", callback_data=f"settings:excl_menu:{poll_id}:{page-1}"))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton("➡️", callback_data=f"settings:excl_menu:{poll_id}:{page+1}"))
+        if nav_row:
+            kb_rows.append(nav_row)
+
+        kb_rows.append([InlineKeyboardButton("↩️ Назад", callback_data=f"settings:poll_menu:{poll_id}")])
+
+        await _edit_message_safely(context, "\n".join(text_lines), query=query, reply_markup=InlineKeyboardMarkup(kb_rows))
+    finally:
+        session.close()
+
+async def toggle_exclude_in_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int, user_id: int, page: int):
+    """Переключает исключение участника и возвращает в меню."""
+    excluded = db.toggle_poll_exclusion(poll_id, user_id)
+    await query.answer("Исключён" if excluded else "Включён", show_alert=False)
+    # Обновляем меню той же страницы
+    await show_poll_exclusion_menu(query, context, poll_id, page) 

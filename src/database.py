@@ -97,6 +97,16 @@ class PollOptionSetting(Base):
     show_count = Column(Integer)
     show_contribution = Column(Integer, default=1)
 
+# --- Новая таблица: исключения участников для конкретного опроса ----------
+
+class PollExclusion(Base):
+    """Содержит пары (poll_id, user_id) для участников, исключённых только из
+    данного опроса. Если записи нет, участник считается включённым.
+    """
+    __tablename__ = 'poll_exclusions'
+    poll_id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, primary_key=True)
+
 
 def init_database():
     """Инициализация структуры базы данных"""
@@ -591,6 +601,38 @@ def commit_session(*instances):
         session.commit()
     except Exception as e:
         logger.error(f"Error in commit_session: {e}")
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+def get_poll_exclusions(poll_id: int, session: Optional[Session] = None) -> set[int]:
+    """Возвращает набор user_id, исключённых из данного опроса."""
+    manage_session = session is None
+    if manage_session:
+        session = SessionLocal()
+    try:
+        rows = session.query(PollExclusion.user_id).filter_by(poll_id=poll_id).all()
+        return {r.user_id for r in rows}
+    finally:
+        if manage_session:
+            session.close()
+
+def toggle_poll_exclusion(poll_id: int, user_id: int):
+    """Переключает статус исключения пользователя для опроса."""
+    session = SessionLocal()
+    try:
+        row = session.query(PollExclusion).filter_by(poll_id=poll_id, user_id=user_id).first()
+        if row:
+            session.delete(row)
+            excluded = False
+        else:
+            session.add(PollExclusion(poll_id=poll_id, user_id=user_id))
+            excluded = True
+        session.commit()
+        return excluded
+    except Exception as e:
+        logger.error(f"Error toggling poll exclusion: {e}")
         session.rollback()
         raise
     finally:

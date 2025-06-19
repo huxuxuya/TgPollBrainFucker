@@ -139,4 +139,29 @@ def test_user_data_is_created_and_updated(db_session):
     
     # Assert: User's name is updated in the database
     user_in_db = db_session.query(User).filter_by(user_id=USER_1['user_id']).first()
-    assert user_in_db.first_name == "Алиса-новое-имя" 
+    assert user_in_db.first_name == "Алиса-новое-имя"
+
+# --- Тесты для исключений участников внутри опроса -------------------------
+
+def test_toggle_poll_exclusion(db_session):
+    # Arrange: создать опрос и участника
+    poll = Poll(poll_id=99, chat_id=-200, options="A,B", status='active')
+    participant = Participant(chat_id=-200, user_id=555)
+    db_session.add_all([poll, participant])
+    db_session.commit()
+
+    # Act: исключаем участника
+    from src import database as db
+    excluded = db.toggle_poll_exclusion(99, 555)
+    assert excluded is True
+
+    # Assert: запись существует
+    excl_ids = db.get_poll_exclusions(99, session=db_session)
+    assert 555 in excl_ids
+
+    # Act: включаем обратно
+    excluded = db.toggle_poll_exclusion(99, 555)
+    assert excluded is False
+
+    excl_ids = db.get_poll_exclusions(99, session=db_session)
+    assert 555 not in excl_ids 

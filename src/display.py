@@ -200,7 +200,10 @@ async def generate_nudge_text(poll_id: int) -> str:
         if not poll: return "Опрос не найден."
         
         participants = db.get_participants(poll.chat_id, session=session)
-        participant_ids = {p.user_id for p in participants if not p.excluded}
+        # Исключения на уровне опроса
+        poll_excl = db.get_poll_exclusions(poll_id, session=session)
+
+        participant_ids = {p.user_id for p in participants if (not p.excluded) and (p.user_id not in poll_excl)}
 
         respondents = db.get_responses(poll_id)
         respondent_ids = {r.user_id for r in respondents}

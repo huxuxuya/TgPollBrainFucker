@@ -100,6 +100,17 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
 
         votes = {(r.user_id, r.response.strip()): True for r in responses}
         
+        # Проставляем флаги excluded для poll-specific исключений
+        poll_excl_ids = db.get_poll_exclusions(poll_id, session=session)
+        for idx, p in enumerate(participants):
+            if p.user_id in poll_excl_ids:
+                # namedtuple – неизменяем, поэтому создаём новый DummyParticipant либо дополняем
+                try:
+                    participants[idx] = p._replace(excluded=1)
+                except AttributeError:
+                    # p может быть ORM-объектом Participant – у него атрибут изменяемый
+                    setattr(p, 'excluded', 1)
+
         # --- Calculate Dimensions & Prepare Canvas ---
         wrapped_options = [_wrap_text(opt, FONT_REGULAR, MIN_CELL_WIDTH - 10) for opt in options]
         max_option_lines = max(len(w) for w in wrapped_options) if wrapped_options else 1
