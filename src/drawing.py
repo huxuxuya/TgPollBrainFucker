@@ -38,17 +38,21 @@ if FONT_REGULAR is None or FONT_BOLD is None:
 
 # Colors
 COLOR_BG = (255, 255, 255)
+# Чуть более выразительный дизайн
+COLOR_HEADER_BG = (240, 245, 255)     # мягкий голубой для заголовков
+COLOR_ROW_ALT_BG = (250, 250, 250)    # чередующиеся строки
 COLOR_GRID = (220, 220, 220)
-COLOR_TEXT = (0, 0, 0)
-COLOR_VOTE_YES = (76, 175, 80) # Material Design Green
-COLOR_VOTE_NO = (245, 245, 245) # Light Grey
-COLOR_EXCLUDED_ROW = (255, 235, 238) # Light Red for the entire row of an excluded user
+COLOR_BORDER = (190, 190, 190)
+COLOR_TEXT = (20, 20, 20)
+COLOR_VOTE_YES = (99, 201, 115)        # более мягкий зелёный
+COLOR_VOTE_NO = (245, 245, 245)        # Light Grey
+COLOR_EXCLUDED_ROW = (255, 235, 238)   # Light Red for the entire row of an excluded user
 
 # Layout
-CELL_HEIGHT = 35
-MIN_CELL_WIDTH = 120
-NAME_COLUMN_WIDTH = 220
-PADDING = 15
+CELL_HEIGHT = 38
+MIN_CELL_WIDTH = 130
+NAME_COLUMN_WIDTH = 240
+PADDING = 18
 
 def _wrap_text(text, font, max_width):
     """Wraps text to fit into a given width."""
@@ -142,21 +146,33 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
         draw = ImageDraw.Draw(image)
 
         # --- Draw Content ---
+        # Header background
+        header_rect_top = PADDING
+        header_rect_bottom = PADDING + header_height
+        draw.rectangle([(PADDING, header_rect_top), (image_width - PADDING, header_rect_bottom)], fill=COLOR_HEADER_BG)
+
         # Draw Option Headers
         for i, option_text_lines in enumerate(wrapped_options):
             x = PADDING + NAME_COLUMN_WIDTH + (i * MIN_CELL_WIDTH)
             line_y = PADDING + 5
             for line in option_text_lines:
-                draw.text((x + 5, line_y), line, font=FONT_REGULAR, fill=COLOR_TEXT)
+                draw.text((x + 8, line_y), line, font=FONT_BOLD, fill=COLOR_TEXT)
                 line_y += 18 # Line height
 
         # Draw Participant Rows
         for p_idx, participant in enumerate(participants):
             y = PADDING + header_height + (p_idx * CELL_HEIGHT)
             
-            # Highlight excluded users by coloring their row
+            # Determine row background: excluded > alternating stripe > default
             if participant.excluded:
-                draw.rectangle([(PADDING, y), (image_width - PADDING, y + CELL_HEIGHT)], fill=COLOR_EXCLUDED_ROW)
+                row_bg = COLOR_EXCLUDED_ROW
+            elif p_idx % 2 == 1:
+                row_bg = COLOR_ROW_ALT_BG
+            else:
+                row_bg = None
+
+            if row_bg:
+                draw.rectangle([(PADDING, y), (image_width - PADDING, y + CELL_HEIGHT)], fill=row_bg)
 
             # Draw name (and truncate if necessary)
             user_name = db.get_user_name(session, participant.user_id)
@@ -173,17 +189,20 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
                 draw.rectangle([(x, y), (x + MIN_CELL_WIDTH, y + CELL_HEIGHT)], fill=cell_color)
 
         # --- Draw Gridlines ---
-        # Vertical
+        # Vertical gridlines
         for i in range(len(options) + 2):
             x_pos = PADDING + NAME_COLUMN_WIDTH + (i * MIN_CELL_WIDTH) if i > 0 else PADDING
             draw.line([(x_pos, PADDING), (x_pos, image_height - PADDING)], fill=COLOR_GRID)
-        # Horizontal
+        # Horizontal gridlines
         for i in range(len(participants) + 1):
             y_pos = PADDING + header_height + (i * CELL_HEIGHT)
             draw.line([(PADDING, y_pos), (image_width - PADDING, y_pos)], fill=COLOR_GRID)
         
         # Bolder separator for names
-        draw.line([(PADDING + NAME_COLUMN_WIDTH, PADDING), (PADDING + NAME_COLUMN_WIDTH, image_height - PADDING)], fill=(180, 180, 180), width=2)
+        draw.line([(PADDING + NAME_COLUMN_WIDTH, PADDING), (PADDING + NAME_COLUMN_WIDTH, image_height - PADDING)], fill=COLOR_BORDER, width=2)
+        
+        # Outer border
+        draw.rectangle([(PADDING, PADDING), (image_width - PADDING, image_height - PADDING)], outline=COLOR_BORDER, width=2)
         
         # --- Finalize ---
         image_buffer = io.BytesIO()
