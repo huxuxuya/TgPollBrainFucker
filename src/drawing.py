@@ -149,11 +149,13 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
         # --- Prepare question text (poll title) ---
         question_text = (poll.message or "").strip()
         title_lines = _wrap_text(question_text, FONT_BOLD, NAME_COLUMN_WIDTH + len(options)*MIN_CELL_WIDTH)
-        title_height = (len(title_lines) * 20 + 8) if title_lines and question_text else 0
+        TITLE_MARGIN = 10  # extra spacing below title to separate from option headers
+        title_height = (len(title_lines) * 20) if title_lines and question_text else 0
+        title_block_height = title_height + (TITLE_MARGIN if question_text else 0)
 
         wrapped_options = [_wrap_text(opt, FONT_REGULAR, MIN_CELL_WIDTH - 10) for opt in options]
         max_option_lines = max(len(w) for w in wrapped_options) if wrapped_options else 1
-        header_height = title_height + (max_option_lines * 18) + 10
+        header_height = title_block_height + (max_option_lines * 18) + 10
 
         image_width = NAME_COLUMN_WIDTH + (len(options) * MIN_CELL_WIDTH) + 2 * PADDING
         image_height = header_height + (len(participants) * CELL_HEIGHT) + 2 * PADDING
@@ -192,7 +194,7 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
         # --- Draw Option Headers ---
         for i, option_text_lines in enumerate(wrapped_options):
             x = PADDING + NAME_COLUMN_WIDTH + (i * MIN_CELL_WIDTH)
-            line_y = PADDING + 5 + title_height
+            line_y = PADDING + 5 + title_block_height
             # Если есть эмодзи для варианта — показываем крупно
             emoji = None
             if hasattr(poll, 'option_settings'):
