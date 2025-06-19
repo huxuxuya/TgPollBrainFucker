@@ -109,30 +109,36 @@ class PollExclusion(Base):
 
 
 def init_database():
-    """Инициализация структуры базы данных"""
+    """Initialize database connection and ensure Alembic migrations are up to date"""
     try:
-        Base.metadata.create_all(engine)
-        logger.info("Database initialized with required tables.")
-        run_migrations()
+        # Attempt to upgrade to the latest version
+        import subprocess
+        subprocess.run(['alembic', 'upgrade', 'head'])
     except Exception as e:
-        logger.error(f"Error initializing database: {e}")
-        raise
+        logger.error(f"Failed to run Alembic upgrade: {e}")
+        raise RuntimeError("Failed to initialize database. Please run 'alembic upgrade head' manually.")
 
 
 def run_migrations():
     """
-    Runs simple, idempotent migrations.
-    This is a basic alternative to a full migration tool like Alembic.
+    This function is deprecated. Use Alembic for database migrations:
+    
+    Initialize database: alembic upgrade head
+    Migrate between SQLite and PostgreSQL: alembic upgrade sqlite_to_postgres
+    
+    Note: This function is kept for backwards compatibility but should not be used directly.
     """
-    logger.info("Running simple database migrations check...")
+    logger.warning("run_migrations() is deprecated. Use Alembic directly instead.")
+    raise RuntimeError("Database migrations should be handled by Alembic. "
+                      "Run 'alembic upgrade head' to initialize the database.")
 
-    try:
-        inspector = inspect(engine)
-
-        # --- Migration 1: Add web_app_id to polls table ---
-        polls_columns = [c['name'] for c in inspector.get_columns('polls')]
-        if 'web_app_id' not in polls_columns:
-            logger.info("MIGRATION: 'web_app_id' column not found in 'polls' table. Adding it.")
+# --- Новая таблица: исключения участников для конкретного опроса ----------
+# Содержит пары (poll_id, user_id) для участников, исключённых только из
+# данного опроса. Если записи нет, участник считается включённым.
+class PollExclusion(Base):
+    __tablename__ = 'poll_exclusions'
+    poll_id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, primary_key=True)
             try:
                 with engine.connect() as connection:
                     # Use VARCHAR without a length for PostgreSQL, which maps to `text`.
@@ -157,9 +163,10 @@ def run_migrations():
             except Exception as e:
                 logger.error(f"MIGRATION FAILED for dropping 'web_apps' table: {e}")
 
-        logger.info("Migrations check finished.")
-    except Exception as e:
-        logger.error(f"An error occurred during the migration process: {e}", exc_info=True)
+        # --- Migration 3: Fix responses table primary key for multiple selections ---
+        if 'responses' in inspector.get_table_names():
+            logger.info("MIGRATION: Checking responses table primary key...")
+            try:
 
 
 def update_user(session: Session, user_id: int, first_name: str, last_name: str, username: str = None):
@@ -193,6 +200,9 @@ def add_or_update_response_ext(session: Session, poll_id: int, user_id: int, fir
     if not poll:
         logger.error(f"Poll with ID {poll_id} not found, can't add response.")
         return
+    
+    # Debug logging for multiple answers setting
+    logger.info(f"[DEBUG] Poll ID {poll_id} multiple answers setting: {poll_setting.allow_multiple_answers if poll_setting else 'No setting found'}")
 
     # Determine the response text
     response_value = None
