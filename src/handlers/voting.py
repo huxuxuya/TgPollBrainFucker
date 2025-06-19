@@ -9,6 +9,10 @@ from src.config import logger, WEB_URL
 from src.display import generate_poll_content
 
 
+# Текст ошибки Telegram при невозможности удаления сообщения.
+DELETE_ERROR_PHRASE = "Message can't be deleted"
+
+
 async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
     """
     Refreshes the poll message after a vote, handling text and photo updates.
@@ -43,7 +47,13 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
                 if poll.photo_file_id:
                     await context.bot.edit_message_media(chat_id=poll.chat_id, message_id=poll.message_id, media=media, reply_markup=reply_markup)
                 else:
-                    await context.bot.delete_message(chat_id=poll.chat_id, message_id=poll.message_id)
+                    try:
+                        await context.bot.delete_message(chat_id=poll.chat_id, message_id=poll.message_id)
+                    except BadRequest as e:
+                        if DELETE_ERROR_PHRASE not in str(e):
+                            raise
+                        # Нельзя удалить — просто оставляем старое сообщение и отправим новое.
+                        logger.warning(f"Couldn't delete old message {poll.message_id}: {e}")
                     new_msg = await context.bot.send_photo(chat_id=poll.chat_id, photo=new_image, caption=new_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
                     poll.message_id = new_msg.message_id
                     if new_msg.photo:
@@ -52,7 +62,12 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
             # Case 2: We don't have an image.
             else:
                 if poll.photo_file_id:
-                    await context.bot.delete_message(chat_id=poll.chat_id, message_id=poll.message_id)
+                    try:
+                        await context.bot.delete_message(chat_id=poll.chat_id, message_id=poll.message_id)
+                    except BadRequest as e:
+                        if DELETE_ERROR_PHRASE not in str(e):
+                            raise
+                        logger.warning(f"Couldn't delete old photo message {poll.message_id}: {e}")
                     new_msg = await context.bot.send_message(chat_id=poll.chat_id, text=new_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
                     poll.message_id = new_msg.message_id
                     poll.photo_file_id = None

@@ -5,6 +5,7 @@ from telegram.helpers import escape_markdown
 import telegram
 import asyncio
 import time
+from telegram.error import BadRequest
 
 from src import database as db
 from src.config import logger, WEB_URL, BOT_OWNER_ID
@@ -469,7 +470,31 @@ async def show_poll_list(query: CallbackQuery, chat_id: int, status: str):
                     delete_button
                 ])
         kb.append([InlineKeyboardButton("↩️ Назад", callback_data=f"dash:group:{chat_id}")])
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN_V2)
+        except BadRequest as e:
+            if "There is no text in the message" in str(e):
+                # Если исходное сообщение было фото/медиа без текста
+                if query.message and query.message.photo:
+                    await context.bot.edit_message_caption(
+                        chat_id=query.message.chat_id,
+                        message_id=query.message.message_id,
+                        caption=text,
+                        reply_markup=InlineKeyboardMarkup(kb),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
+                else:
+                    # fallback: удалить и отправить новое текстовое сообщение
+                    await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
+                    await context.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=text,
+                        reply_markup=InlineKeyboardMarkup(kb),
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
+            else:
+                raise
     finally:
         session.close()
 
