@@ -563,4 +563,35 @@ def has_user_created_poll_in_chat(user_id: int, chat_id: int) -> bool:
         )
         return count > 0
     finally:
+        session.close()
+
+# --- Utility helpers -------------------------------------------------------
+
+def commit_session(*instances):
+    """Commits changes for the given ORM instances in a fresh session.
+
+    Поскольку во многих обработчиках мы получаем объекты через функции, которые
+    внутри себя уже закрывают сессию, объекты становятся "detached". Чтобы всё
+    же сохранить модификации, мы создаём новую сессию, `merge`-им переданные
+    экземпляры и фиксируем изменения.
+
+    Использование:
+
+        poll.nudge_message_id = 123
+        db.commit_session(poll)
+
+    Если объекты не переданы, функция просто делает `commit()` пустой сессии –
+    это безопасно, но ни на что не влияет.
+    """
+    session = SessionLocal()
+    try:
+        for obj in instances:
+            if obj is not None:
+                session.merge(obj)
+        session.commit()
+    except Exception as e:
+        logger.error(f"Error in commit_session: {e}")
+        session.rollback()
+        raise
+    finally:
         session.close() 

@@ -5,6 +5,8 @@ from typing import Optional
 from . import database as db
 from .config import logger
 
+from collections import namedtuple
+
 # --- Constants ---
 try:
     # Using a common font, assuming it exists. A bundled font would be more robust.
@@ -60,6 +62,32 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
         participants = db.get_participants(poll.chat_id, session=session)
         responses = db.get_responses(poll_id)
         
+        # --- Ensure we have participant rows ---------------------------------
+        # В случае, если в таблице participants нет записей (или нет тех, кто
+        # уже проголосовал), добавим «виртуальных» участников только для
+        # отрисовки карты.
+
+        if not participants:
+            logger.info(f"No participants stored for chat {poll.chat_id}; building list from responders for heatmap")
+
+        participant_ids_present = {p.user_id for p in participants}
+        dummy_needed_ids = [r.user_id for r in responses if r.user_id not in participant_ids_present]
+
+        if dummy_needed_ids:
+            DummyParticipant = namedtuple('Participant', ['user_id', 'chat_id', 'username', 'first_name', 'last_name', 'excluded'])
+            for uid in dummy_needed_ids:
+                user = session.query(db.User).filter_by(user_id=uid).first()
+                participants.append(
+                    DummyParticipant(
+                        user_id=uid,
+                        chat_id=poll.chat_id,
+                        username=getattr(user, 'username', None) if user else None,
+                        first_name=getattr(user, 'first_name', None) if user else None,
+                        last_name=getattr(user, 'last_name', None) if user else None,
+                        excluded=0,
+                    )
+                )
+
         # Determine poll options, dynamically for web apps.
         if poll.poll_type == 'native' and poll.options:
             options = [opt.strip() for opt in poll.options.split(',')]

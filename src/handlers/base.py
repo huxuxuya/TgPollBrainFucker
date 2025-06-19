@@ -84,6 +84,16 @@ async def register_user_activity(update: Update, context: ContextTypes.DEFAULT_T
     chat_id = update.message.chat.id
     user_name = update.message.from_user.full_name
     
-    # This function will handle adding the user and participant if they don't exist.
-    db.add_participant(chat_id, user_id, user_name)
+    # Сохраняем пользователя и участника (если их ещё нет) в БД
+    username = update.message.from_user.username
+    first_name = update.message.from_user.first_name or ""
+    last_name = update.message.from_user.last_name or ""
+
+    db.add_user_to_participants(
+        chat_id=chat_id,
+        user_id=user_id,
+        username=username,
+        first_name=first_name,
+        last_name=last_name,
+    )
     logger.info(f"Registered activity for user {user_id} in chat {chat_id}") 

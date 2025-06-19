@@ -23,7 +23,7 @@ async def test_register_user_activity_in_group(mocker):
     Tests that a user sending a message in a group gets registered.
     """
     # Arrange
-    mocker.patch('src.database.add_participant')
+    mocker.patch('src.database.add_user_to_participants')
     from src import database as db
 
     mock_update = MagicMock(spec=Update)
@@ -31,6 +31,9 @@ async def test_register_user_activity_in_group(mocker):
     mock_user.id = 123
     mock_user.is_bot = False
     mock_user.full_name = "Test User"
+    mock_user.username = "testuser"
+    mock_user.first_name = "Test"
+    mock_user.last_name = "User"
 
     mock_chat = Chat(id=-1001, type=Chat.GROUP)
     mock_message = Message(message_id=1, date=None, chat=mock_chat, from_user=mock_user)
@@ -40,7 +43,13 @@ async def test_register_user_activity_in_group(mocker):
     await base.register_user_activity(mock_update, MagicMock())
 
     # Assert
-    db.add_participant.assert_called_once_with(-1001, 123, "Test User")
+    db.add_user_to_participants.assert_called_once_with(
+        chat_id=-1001,
+        user_id=123,
+        username="testuser",
+        first_name="Test",
+        last_name="User",
+    )
 
 @pytest.mark.asyncio
 async def test_register_user_activity_ignored_in_private(mocker):
@@ -48,7 +57,7 @@ async def test_register_user_activity_ignored_in_private(mocker):
     Tests that user activity in a private chat is ignored for participant registration.
     """
     # Arrange
-    mocker.patch('src.database.add_participant')
+    mocker.patch('src.database.add_user_to_participants')
     from src import database as db
 
     mock_update = MagicMock(spec=Update)
@@ -56,6 +65,9 @@ async def test_register_user_activity_ignored_in_private(mocker):
     mock_user.id = 123
     mock_user.is_bot = False
     mock_user.full_name = "Test User"
+    mock_user.username = "testuser"
+    mock_user.first_name = "Test"
+    mock_user.last_name = "User"
 
     mock_chat = Chat(id=123, type=Chat.PRIVATE)
     mock_message = Message(message_id=1, date=None, chat=mock_chat, from_user=mock_user)
@@ -65,7 +77,7 @@ async def test_register_user_activity_ignored_in_private(mocker):
     await base.register_user_activity(mock_update, MagicMock())
 
     # Assert
-    db.add_participant.assert_not_called()
+    db.add_user_to_participants.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_show_participants_list_empty(mocker):

@@ -122,7 +122,7 @@ async def nudge_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, poll
     try:
         msg = await context.bot.send_message(chat_id=poll.chat_id, text=nudge_text, reply_to_message_id=poll.message_id, parse_mode=ParseMode.MARKDOWN_V2)
         poll.nudge_message_id = msg.message_id
-        db.commit_session()
+        db.commit_session(poll)
         await query.answer("Оповещение отправлено!", show_alert=False)
     except Exception as e:
         logger.error(f"Failed to send nudge message for poll {poll_id}: {e}")
@@ -145,7 +145,7 @@ async def del_nudge_handler(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     # Always clear the nudge message ID from the database first.
     # This ensures our state is corrected even if the deletion fails.
     poll.nudge_message_id = None
-    db.commit_session()
+    db.commit_session(poll)
 
     if nudge_id_to_delete:
         try:

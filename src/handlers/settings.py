@@ -251,7 +251,7 @@ def toggle_boolean_setting(poll_id: int, setting_key: str):
     if hasattr(setting, setting_key):
         current_value = getattr(setting, setting_key, False)
         setattr(setting, setting_key, not current_value)
-        db.commit_session()
+        db.commit_session(setting)
     else:
         logger.warning(f"Attempted to toggle non-existent setting '{setting_key}' on poll {poll_id}")
 
@@ -271,4 +271,4 @@ def toggle_boolean_option_setting(poll_id: int, option_index: int, setting_key: 
         current_value = 1 if current_value is None else current_value
         setattr(option_setting, setting_key, 1 - current_value)
 
-    db.commit_session() 
+    db.commit_session(option_setting) 
