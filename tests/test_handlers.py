@@ -6,7 +6,7 @@ import io
 from telegram import Update, User, Chat, Message, CallbackQuery, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from src.handlers import base, dashboard, voting
+from src.handlers import base, dashboard, voting, results
 from src.database import Participant, Poll, PollSetting
 
 @pytest.fixture
@@ -282,4 +282,75 @@ async def test_vote_callback_handler_calls_db_correctly(
     mock_session.commit.assert_called()
 
     # 3. Check that the user gets a confirmation
-    mock_query.answer.assert_called() 
+    mock_query.answer.assert_called()
+
+# --- NEW TESTS FOR HEATMAP DISPLAY IN show_results ---
+
+@pytest.mark.asyncio
+@patch('src.handlers.results.generate_poll_content', return_value=("Caption", io.BytesIO(b"imgbytes")))
+async def test_show_results_edits_existing_photo(mock_generate_content, mocker, mock_context):
+    """Если сообщение уже содержит фото, show_results должен редактировать медиа."""
+    from src.handlers import results
+    from src.database import Poll
+
+    # Подготовка фиктивного опроса
+    poll = Poll(poll_id=1, chat_id=-1001, message="title", status='active')
+    mocker.patch('src.handlers.results.db.get_poll', return_value=poll)
+
+    # CallbackQuery с сообщением-фото
+    mock_query = AsyncMock(spec=CallbackQuery)
+    message = MagicMock()
+    message.photo = [MagicMock()]
+    message.chat_id = -1001
+    message.message_id = 55
+    mock_query.message = message
+    mock_query.data = 'results:refresh:1'
+    mock_query.edit_message_media = AsyncMock()
+    mock_query.answer = AsyncMock()
+
+    # Update
+    mock_update = MagicMock(spec=Update)
+    mock_update.callback_query = mock_query
+
+    # Context
+    context = mock_context
+
+    # Act
+    await results.show_results(mock_update, context, poll_id=1)
+
+    # Assert
+    mock_query.edit_message_media.assert_called_once()
+    context.bot.send_photo.assert_not_called()
+
+@pytest.mark.asyncio
+@patch('src.handlers.results.generate_poll_content', return_value=("Caption", io.BytesIO(b"imgbytes")))
+async def test_show_results_sends_photo_when_text(mock_generate_content, mocker, mock_context):
+    """Если сообщение было текстовым, show_results должен удалить его и отправить новое фото."""
+    from src.handlers import results
+    from src.database import Poll
+
+    poll = Poll(poll_id=2, chat_id=-1001, message="title", status='active')
+    mocker.patch('src.handlers.results.db.get_poll', return_value=poll)
+
+    mock_query = AsyncMock(spec=CallbackQuery)
+    message = MagicMock()
+    message.photo = []  # нет фото
+    message.chat_id = -1001
+    message.message_id = 56
+    mock_query.message = message
+    mock_query.data = 'results:refresh:2'
+    mock_query.edit_message_media = AsyncMock()
+    mock_query.answer = AsyncMock()
+
+    mock_update = MagicMock(spec=Update)
+    mock_update.callback_query = mock_query
+
+    context = mock_context
+    # bot.delete_message нужно для проверки
+    context.bot.delete_message = AsyncMock()
+
+    await results.show_results(mock_update, context, poll_id=2)
+
+    context.bot.send_photo.assert_called_once()
+    context.bot.delete_message.assert_called_once_with(chat_id=-1001, message_id=56)
+    mock_query.edit_message_media.assert_not_called() 

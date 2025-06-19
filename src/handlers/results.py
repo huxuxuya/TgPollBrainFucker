@@ -80,7 +80,7 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
                 await query.edit_message_media(media=media, reply_markup=reply_markup)
             else:
                 # Иначе удаляем текстовое сообщение и шлём новое фото
-                await query.delete_message()
+                await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
                 await context.bot.send_photo(chat_id=query.message.chat_id,
                                              photo=image_bytes,
                                              caption=text,
@@ -90,7 +90,7 @@ async def show_results(update: Update, context: ContextTypes.DEFAULT_TYPE, poll_
             # Нет изображения – показываем только текст
             if query.message.photo:
                 # Старое было фото – заменяем на текст
-                await query.delete_message()
+                await context.bot.delete_message(chat_id=query.message.chat_id, message_id=query.message.message_id)
                 await context.bot.send_message(chat_id=query.message.chat_id,
                                                text=text,
                                                reply_markup=reply_markup,
