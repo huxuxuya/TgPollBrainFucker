@@ -23,84 +23,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Migrate data from SQLite to PostgreSQL"""
-    # Get the current connection
-    connection = op.get_bind()
-    
-    # Create a session for SQLite
-    sqlite_engine = sa.create_engine('sqlite:///poll_data.db')
-    SQLiteSession = sessionmaker(bind=sqlite_engine)
-    sqlite_session = SQLiteSession()
-    
-    # The order matters due to foreign key constraints
-    MODELS_IN_ORDER = [
-        User, KnownChat, Participant, WebApp, Poll,
-        Response, PollSetting, PollOptionSetting
-    ]
-    
-    try:
-        # Clear PostgreSQL database
-        for model in reversed(MODELS_IN_ORDER):
-            table_name = model.__tablename__
-            connection.execute(text(f"DELETE FROM {table_name}"))
-            
-        # Migrate data
-        for model in MODELS_IN_ORDER:
-            table_name = model.__tablename__
-            all_objects = sqlite_session.query(model).all()
-            
-            if all_objects:
-                for obj in all_objects:
-                    data = {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
-                    insert_sql = f"INSERT INTO {table_name} ({', '.join(data.keys())}) VALUES ({', '.join(['%s'] * len(data))})"
-                    connection.execute(text(insert_sql), tuple(data.values()))
-                    
-        connection.commit()
-        
-    except Exception as e:
-        connection.rollback()
-        raise e
-    finally:
-        sqlite_session.close()
+    """This migration is a one-off for local data transfer and is disabled for deployment."""
+    pass
 
 
 def downgrade() -> None:
-    """Migrate data from PostgreSQL back to SQLite"""
-    # Get the current connection
-    connection = op.get_bind()
-    
-    # Create a session for SQLite
-    sqlite_engine = sa.create_engine('sqlite:///poll_data.db')
-    SQLiteSession = sessionmaker(bind=sqlite_engine)
-    sqlite_session = SQLiteSession()
-    
-    # The order matters due to foreign key constraints
-    MODELS_IN_ORDER = [
-        User, KnownChat, Participant, WebApp, Poll,
-        Response, PollSetting, PollOptionSetting
-    ]
-    
-    try:
-        # Clear SQLite database
-        for model in reversed(MODELS_IN_ORDER):
-            table_name = model.__tablename__
-            sqlite_session.query(model).delete()
-            sqlite_session.commit()
-            
-        # Migrate data
-        for model in MODELS_IN_ORDER:
-            table_name = model.__tablename__
-            result = connection.execute(text(f"SELECT * FROM {table_name}")).fetchall()
-            
-            if result:
-                for row in result:
-                    obj = model(**dict(zip(row._fields, row)))
-                    sqlite_session.add(obj)
-                    
-        sqlite_session.commit()
-        
-    except Exception as e:
-        sqlite_session.rollback()
-        raise e
-    finally:
-        sqlite_session.close()
+    """This migration is a one-off for local data transfer and is disabled for deployment."""
+    pass
