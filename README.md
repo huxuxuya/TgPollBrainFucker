@@ -69,22 +69,48 @@ While most actions are done via buttons, here are the primary commands:
     git clone <repository_url>
     cd TgPollBrainFucker
     ```
-2.  **Install Dependencies**:
+
+2.  **Create Virtual Environment**:
+    ```bash
+    python -m venv .venv
+    .\.venv\Scripts\activate  # Windows
+    ```
+
+3.  **Install Dependencies**:
     ```bash
     pip install -r requirements.txt
     ```
-3.  **Configure Environment**:
-    -   Create a file named `.env` in the root directory.
-    -   Add your bot's token to it:
+
+4.  **Configure Environment**:
+    - Create a file named `.env` in the root directory.
+    - Add your bot's token and other required settings:
         ```
         BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
         BOT_OWNER_ID="987654321" # Your numeric Telegram user ID
         WEB_URL="https://your-app-name.onrender.com" # Required for Web Apps
+        DATABASE_URL="postgresql://user:password@localhost/poll_bot"
         ```
-4.  **Run the Bot**:
+
+5.  **Initialize Database**:
     ```bash
-    python bot.py
+    python migrate.py upgrade head
     ```
+
+6.  **Run the Bot**:
+    ```bash
+    python -m src.bot
+    ```
+
+**Tech Stack:**
+- `python-telegram-bot` (async version)
+- `SQLAlchemy` with PostgreSQL
+- `psycopg2-binary`
+- `gunicorn` for production deployment
+- `uvicorn` and `starlette` for Web App functionality
+- `jinja2` for templates
+- `aiofiles` for async file operations
+- `Pillow` for image processing
+- `python-dotenv` for environment variables
 
 ---
 
