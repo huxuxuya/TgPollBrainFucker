@@ -1,0 +1,8 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+Вся работа с БД должна происходить через  ORM.
+
+Приложение может запускаться и работать как с SQLite так и с Postgres

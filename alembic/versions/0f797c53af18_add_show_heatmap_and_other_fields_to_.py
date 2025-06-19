@@ -39,8 +39,23 @@ def upgrade() -> None:
         
         # Note: alter_column and drop_column are generally idempotent or will fail if the state is not as expected.
         # If these also cause issues, they would need similar checks.
-        batch_op.alter_column('default_show_names', type_=sa.Boolean(), existing_type=sa.INTEGER())
-        batch_op.alter_column('default_show_count', type_=sa.Boolean(), existing_type=sa.INTEGER())
+        dialect_name = op.get_bind().dialect.name
+        if dialect_name == 'postgresql':
+            batch_op.alter_column('default_show_names',
+                   type_=sa.Boolean(),
+                   existing_type=sa.INTEGER(),
+                   postgresql_using='default_show_names::boolean')
+            batch_op.alter_column('default_show_count',
+                   type_=sa.Boolean(),
+                   existing_type=sa.INTEGER(),
+                   postgresql_using='default_show_count::boolean')
+        else:
+            batch_op.alter_column('default_show_names',
+                   type_=sa.Boolean(),
+                   existing_type=sa.INTEGER())
+            batch_op.alter_column('default_show_count',
+                   type_=sa.Boolean(),
+                   existing_type=sa.INTEGER())
         if column_exists('poll_settings', 'silent_update'):
             batch_op.drop_column('silent_update')
         if column_exists('poll_settings', 'nudge_positive_emoji'):
