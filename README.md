@@ -88,29 +88,44 @@ While most actions are done via buttons, here are the primary commands:
         BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
         BOT_OWNER_ID="987654321" # Your numeric Telegram user ID
         WEB_URL="https://your-app-name.onrender.com" # Required for Web Apps
-        DATABASE_URL="postgresql://user:password@localhost/poll_bot"
+        
+        # For local development, you can use SQLite:
+        DATABASE_URL="sqlite:///poll_data.db"
+
+        # Or, for PostgreSQL:
+        # DATABASE_URL="postgresql://user:password@localhost/poll_bot"
         ```
 
 5.  **Initialize Database**:
+    The project uses `alembic` to manage database migrations. The `alembic` directory contains the migration scripts.
     ```bash
-    python migrate.py upgrade head
+    alembic upgrade head
     ```
 
 6.  **Run the Bot**:
     ```bash
-    python -m src.bot
+    python bot.py
     ```
+
+7.  **(Optional) Running Tests**:
+    To run the test suite, first install the development dependencies:
+    ```bash
+    pip install -r requirements-dev.txt
+    ```
+    Then, run pytest from the root directory:
+    ```bash
+    pytest
+    ```
+
 
 **Tech Stack:**
 - `python-telegram-bot` (async version)
-- `SQLAlchemy` with PostgreSQL
-- `psycopg2-binary`
+- `SQLAlchemy` with `Alembic` for migrations
+- `PostgreSQL` or `SQLite`
 - `gunicorn` for production deployment
 - `uvicorn` and `starlette` for Web App functionality
-- `jinja2` for templates
-- `aiofiles` for async file operations
 - `Pillow` for image processing
-- `python-dotenv` for environment variables
+- `pytest` for testing
 
 ---
 
@@ -122,10 +137,3 @@ While most actions are done via buttons, here are the primary commands:
     -   The bot automatically adds users to the participant list when they send a message in the group. You can also add them manually via the dashboard.
 -   **Why aren't results updating?**
     -   Make sure the bot is still an admin and has not been blocked by any group members. Check the bot's logs for any errors.
-
----
-
-**Tech Stack:**
-- `python-telegram-bot`
-- `SQLAlchemy`
-- `python-dotenv`

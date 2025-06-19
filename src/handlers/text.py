@@ -1,5 +1,6 @@
 from telegram import Update
 from telegram.ext import ContextTypes
+from telegram.helpers import escape_markdown
 import asyncio
 
 from src import database as db
@@ -115,8 +116,10 @@ async def _handle_poll_creation(update: Update, context: ContextTypes.DEFAULT_TY
             prompt_addition = "Пустой вариант ответа не был добавлен."
 
         # Give feedback by updating the message
-        current_options_text = "\n".join([f"▫️ {opt}" for opt in options])
-        prompt = f"{prompt_addition}\n\n*Текущие варианты:*\n{current_options_text}\n\nПродолжайте добавлять или нажмите /done."
+        # Escape each user-provided option for MarkdownV2 to prevent injection or parsing errors.
+        current_options_text = "\n".join([f"▫️ {escape_markdown(opt, version=2)}" for opt in options])
+        # Manually escape the dots in the static text parts to avoid Telegram API errors.
+        prompt = fr"{prompt_addition}\n\n*Текущие варианты:*\n{current_options_text}\n\nДобавьте ещё варианты или напишите /done."
         await context.bot.edit_message_text(prompt, chat_id=update.effective_chat.id, message_id=message_to_edit, parse_mode='MarkdownV2')
 
 

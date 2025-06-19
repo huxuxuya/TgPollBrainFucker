@@ -198,14 +198,55 @@ def test_generate_poll_text_for_webapp_no_votes(mocker, mock_poll, mock_session)
     """
     # Arrange
     mock_poll.poll_type = 'webapp'
-    mocker.patch('src.database.get_responses', return_value=[])
-    mocker.patch('src.database.get_poll_setting', return_value=PollSetting())
-    mocker.patch('src.display.generate_results_heatmap_image', return_value=b'fake_image')
+
+def test_generate_poll_text_with_voter_emojis(mocker, mock_poll, mock_session):
+    """
+    Tests that voter emojis are correctly displayed next to their names.
+    """
+    # Arrange: Mock DB calls
+    responses = [
+        Response(user_id=101, response="Красный"),
+        Response(user_id=102, response="Синий"),
+    ]
+    mocker.patch('src.database.get_responses', return_value=responses)
+    # Disable heatmap to simplify test assertion by not needing to check the image
+    mocker.patch('src.database.get_poll_setting', return_value=PollSetting(default_show_names=True, show_heatmap=False))
+
+    # Mock user name fetching
+    def get_user_name_mock(session, user_id, markdown_link=False):
+        names = {101: "Алиса", 102: "Боб"}
+        name = names.get(user_id, "Unknown")
+        return f'[{name}](tg://user?id={user_id})' if markdown_link else name
+    mocker.patch('src.database.get_user_name', side_effect=get_user_name_mock)
+
+    # Mock emoji fetching for each option based on its index
+    def get_poll_option_setting_mock(poll_id, option_index):
+        # In mock_poll: 0 -> Красный, 1 -> Синий
+        emojis = {
+            0: "❤️",
+            1: "💙",
+        }
+        emoji = emojis.get(option_index)
+        
+        # The real function returns a PollOptionSetting object.
+        # We need to mock all attributes that are accessed in display.py to avoid AttributeErrors
+        mock_setting = MagicMock()
+        mock_setting.show_names = True
+        mock_setting.names_style = 'list'
+        mock_setting.is_priority = 0
+        mock_setting.contribution_amount = 0
+        mock_setting.emoji = emoji # Assign the correct emoji or None
+        mock_setting.show_count = True
+        mock_setting.show_contribution = True
+        return mock_setting
+
+    mocker.patch('src.database.get_poll_option_setting', side_effect=get_poll_option_setting_mock)
 
     # Act
     text, image = generate_poll_content(poll=mock_poll, session=mock_session)
 
     # Assert
-    assert "Какой твой любимый цвет?" in text
-    # Crucially, the image should be None for this specific case
-    assert image is None 
+    # In display.py, the emoji has a space added, and the line is indented.
+    assert "    ❤️ [Алиса](tg://user?id=101)" in text
+    assert "    💙 [Боб](tg://user?id=102)" in text
+    assert image is None # We disabled the heatmap 
