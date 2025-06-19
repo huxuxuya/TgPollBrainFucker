@@ -361,7 +361,7 @@ async def toggle_exclude_in_poll(query: CallbackQuery, context: ContextTypes.DEF
 
     # --- Refresh nudge message, if any ---
     poll = db.get_poll(poll_id)
-    if poll and poll.nudge_message_id:
+    if poll:
         try:
             nudge_text = await generate_nudge_text(poll_id)
             await context.bot.edit_message_text(
@@ -371,9 +371,21 @@ async def toggle_exclude_in_poll(query: CallbackQuery, context: ContextTypes.DEF
                 parse_mode=ParseMode.MARKDOWN_V2,
             )
             # if nobody pending -> clear id
-            if "Все участники проголосовали" in nudge_text or "*Ждем вашего голоса:*" in nudge_text and nudge_text.strip().endswith("!_ 🎉"):
+            if "Все участники проголосовали" in nudge_text:
                 poll.nudge_message_id = None
                 db.commit_session(poll)
         except BadRequest as e:
             if "Message is not modified" not in str(e):
                 logger.warning(f"Failed to edit nudge message after exclusion change: {e}")
+
+        # -- If there was no existing nudge and we now have non-voters, create one --
+        if poll and not poll.nudge_message_id:
+            nudge_text = await generate_nudge_text(poll_id)
+            if "Все участники проголосовали" not in nudge_text:
+                new_msg = await context.bot.send_message(
+                    chat_id=poll.chat_id,
+                    text=nudge_text,
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+                poll.nudge_message_id = new_msg.message_id
+                db.commit_session(poll)

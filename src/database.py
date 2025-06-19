@@ -206,7 +206,7 @@ def add_or_update_response(poll_id: int, user_id: int, first_name: str, last_nam
             option_index=option_index,
             option_text=option_text
         )
-        session.commit()
+        safe_commit(session)
     except Exception as e:
         logger.error(f"Exception in add_or_update_response: {e}", exc_info=True)
         session.rollback()
@@ -224,7 +224,7 @@ def add_user_to_participants(chat_id: int, user_id: int, username: str, first_na
             participant = Participant(chat_id=chat_id, user_id=user_id, username=username, first_name=first_name, last_name=last_name)
             session.add(participant)
         
-        session.commit()
+        safe_commit(session)
     except Exception as e:
         logger.error(f"Error in add_user_to_participants: {e}")
         session.rollback()
@@ -236,7 +236,7 @@ def update_user_standalone(user_id: int, first_name: str, last_name: str, userna
     session = SessionLocal()
     try:
         update_user(session, user_id, first_name, last_name, username)
-        session.commit()
+        safe_commit(session)
     except Exception as e:
         logger.error(f"Error in update_user_standalone: {e}")
         session.rollback()
@@ -254,7 +254,7 @@ def update_known_chats(chat_id: int, title: str, chat_type: str) -> None:
         else:
             chat = KnownChat(chat_id=chat_id, title=title, type=chat_type)
             session.add(chat)
-        session.commit()
+        safe_commit(session)
     except Exception as e:
         logger.error(f"Error updating known chats: {e}")
         session.rollback()
@@ -367,7 +367,7 @@ def get_poll_setting(poll_id: int, create: bool = False, session: Optional[Sessi
             # We need to commit here if we created it, so the calling function can use it.
             # A flush might be sufficient, but commit is safer for cross-function use.
             if manage_session:
-                session.commit()
+                safe_commit(session)
             else:
                 # If we are in a managed session, just flush to get the ID
                 session.flush()
@@ -386,7 +386,7 @@ def get_poll_option_setting(poll_id: int, option_index: int, create: bool = Fals
             setting = PollOptionSetting(poll_id=poll_id, option_index=option_index)
             session.add(setting)
             # Commit to persist, then refresh to make sure attributes are loaded
-            session.commit()
+            safe_commit(session)
         if setting is not None and manage_session:
             # Ensure attributes loaded then detach so can be used outside
             session.refresh(setting)
@@ -438,7 +438,7 @@ def add_poll(poll: Poll) -> int:
     """Adds a poll to the database and returns its new ID."""
     session = SessionLocal()
     session.add(poll)
-    session.commit()
+    safe_commit(session)
     poll_id = poll.poll_id
     session.close()
     return poll_id
@@ -446,44 +446,44 @@ def add_poll(poll: Poll) -> int:
 def add_response(response: Response):
     session = SessionLocal()
     session.add(response)
-    session.commit()
+    safe_commit(session)
     session.close()
 
 def add_participant(participant: Participant):
     session = SessionLocal()
     session.add(participant)
-    session.commit()
+    safe_commit(session)
     session.close()
 
 def add_poll_setting(setting: PollSetting):
     session = SessionLocal()
     session.add(setting)
-    session.commit()
+    safe_commit(session)
     session.close()
 
 def add_poll_option_setting(setting: PollOptionSetting):
     session = SessionLocal()
     session.add(setting)
-    session.commit()
+    safe_commit(session)
     session.close()
 
 def delete_response(response: Response):
     session = SessionLocal()
     session.delete(response)
-    session.commit()
+    safe_commit(session)
     session.close()
 
 def delete_poll(poll: Poll):
     session = SessionLocal()
     session.delete(poll)
-    session.commit()
+    safe_commit(session)
     session.close()
 
 def delete_participants(chat_id: int):
     session = SessionLocal()
     try:
         session.query(Participant).filter_by(chat_id=chat_id).delete()
-        session.commit()
+        safe_commit(session)
     except Exception as e:
         logger.error(f"Error deleting participants for chat {chat_id}: {e}")
         session.rollback()
@@ -494,7 +494,7 @@ def delete_responses_for_poll(poll_id: int):
     session = SessionLocal()
     try:
         session.query(Response).filter_by(poll_id=poll_id).delete()
-        session.commit()
+        safe_commit(session)
     except Exception as e:
         logger.error(f"Error deleting responses for poll {poll_id}: {e}")
         session.rollback()
@@ -505,7 +505,7 @@ def delete_poll_setting(poll_id: int):
     session = SessionLocal()
     try:
         session.query(PollSetting).filter_by(poll_id=poll_id).delete()
-        session.commit()
+        safe_commit(session)
     except Exception as e:
         logger.error(f"Error deleting poll setting for poll {poll_id}: {e}")
         session.rollback()
@@ -516,7 +516,7 @@ def delete_poll_option_settings(poll_id: int):
     session = SessionLocal()
     try:
         session.query(PollOptionSetting).filter_by(poll_id=poll_id).delete()
-        session.commit()
+        safe_commit(session)
     except Exception as e:
         logger.error(f"Error deleting poll option settings for poll {poll_id}: {e}")
         session.rollback()
@@ -547,6 +547,59 @@ def has_user_created_poll_in_chat(user_id: int, chat_id: int) -> bool:
 
 # --- Utility helpers -------------------------------------------------------
 
+def deduplicate_participants(session, chat_id: Optional[int] = None):
+    """Remove duplicate rows in participants table keeping the first encountered row.
+    Works around historical duplicates that break UPDATEs (StaleDataError)."""
+    from sqlalchemy import text
+    if session.bind.dialect.name == "sqlite":
+        # rowid is available in SQLite
+        if chat_id is not None:
+            sql = text("""
+                DELETE FROM participants
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM participants
+                    GROUP BY chat_id, user_id
+                ) AND chat_id = :chat_id;
+            """)
+            session.execute(sql, {"chat_id": chat_id})
+        else:
+            session.execute(text("""
+                DELETE FROM participants
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM participants
+                    GROUP BY chat_id, user_id
+                );
+            """))
+    else:
+        # Generic SQL: use CTE and window functions (works on Postgres, MySQL 8+)
+        if chat_id is not None:
+            session.execute(text("""
+                WITH ranked AS (
+                    SELECT ctid AS rid, ROW_NUMBER() OVER (PARTITION BY chat_id, user_id) AS rn
+                    FROM participants WHERE chat_id = :chat_id
+                )
+                DELETE FROM participants p USING ranked r
+                WHERE p.ctid = r.rid AND r.rn > 1;
+            """), {"chat_id": chat_id})
+        else:
+            session.execute(text("""
+                WITH ranked AS (
+                    SELECT ctid AS rid, ROW_NUMBER() OVER (PARTITION BY chat_id, user_id) AS rn FROM participants
+                )
+                DELETE FROM participants p USING ranked r WHERE p.ctid = r.rid AND r.rn > 1;
+            """))
+
+
+def safe_commit(session: Session):
+    """Wrap session.commit with rollback on failure. Runtime deduplication removed; now handled by Alembic migration and DB constraints."""
+    try:
+        session.commit()
+    except Exception as e:
+        logger.error(f"Commit failed: {e}")
+        session.rollback()
+        raise
+
+
 def commit_session(*instances):
     """Commits changes for the given ORM instances in a fresh session.
 
@@ -568,7 +621,7 @@ def commit_session(*instances):
         for obj in instances:
             if obj is not None:
                 session.merge(obj)
-        session.commit()
+        safe_commit(session)
     except Exception as e:
         logger.error(f"Error in commit_session: {e}")
         session.rollback()
@@ -599,7 +652,7 @@ def toggle_poll_exclusion(poll_id: int, user_id: int):
         else:
             session.add(PollExclusion(poll_id=poll_id, user_id=user_id))
             excluded = True
-        session.commit()
+        safe_commit(session)
         return excluded
     except Exception as e:
         logger.error(f"Error toggling poll exclusion: {e}")

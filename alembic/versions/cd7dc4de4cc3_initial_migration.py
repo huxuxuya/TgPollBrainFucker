@@ -45,7 +45,11 @@ def upgrade() -> None:
             for fk in fkeys
         )
         if not fk_exists:
-            op.create_foreign_key(None, 'responses', 'polls', ['poll_id'], ['poll_id'])
+            if bind.dialect.name != 'sqlite':
+                op.create_foreign_key(None, 'responses', 'polls', ['poll_id'], ['poll_id'])
+            else:
+                # SQLite cannot add FK via ALTER; assume FK not critical for local dev
+                pass
     # ### end Alembic commands ###
 
 

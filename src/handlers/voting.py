@@ -2,21 +2,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, User, W
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
-from sqlalchemy.orm.exc import StaleDataError
+
 import telegram
 
-
-def safe_commit(session, poll_id):
-    try:
-        safe_commit(session, poll_id)
-    except StaleDataError as e:
-        logger.warning(f"StaleDataError while committing poll update {poll_id}: {e}; retry retrying")
-        session.rollback()
-        session.expire_all()
-        try:
-            safe_commit(session, poll_id)
-        except Exception as e2:
-            logger.error(f"Second commit failed for poll {poll_id}: {e2}")
+from src.database import safe_commit
 
 from src import database as db
 from src.config import logger, WEB_URL
@@ -101,7 +90,7 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
                 # обычное текстовое сообщение
                 await context.bot.edit_message_text(text=new_caption, chat_id=poll.chat_id, message_id=poll.message_id, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
 
-            safe_commit(session, poll_id)
+            safe_commit(session)
 
             # --- Update nudge message if exists ---
             if poll.nudge_message_id:
@@ -116,7 +105,7 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
                     # If everyone has voted, optionally clear the nudge id
                     if "Все участники проголосовали" in nudge_text:
                         poll.nudge_message_id = None
-                        safe_commit(session, poll_id)
+                        safe_commit(session)
                 except BadRequest as e:
                     if "Message is not modified" not in str(e):
                         logger.warning(f"Failed to edit nudge message {poll.nudge_message_id}: {e}")

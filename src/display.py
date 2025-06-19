@@ -188,7 +188,7 @@ def generate_poll_content(poll_id: int = None, poll: Optional[db.Poll] = None, s
         # We only commit if we created the session inside this function.
         # The calling function is responsible for committing if it passed its own session.
         if manage_session:
-            session.commit()
+            db.safe_commit(session)
         
         logger.info(f"[DEBUG] Final poll text for poll {poll_id}:\n{final_text}")
         return final_text, image_bytes
