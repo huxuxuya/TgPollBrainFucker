@@ -139,17 +139,18 @@ class PollExclusion(Base):
     __tablename__ = 'poll_exclusions'
     poll_id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, primary_key=True)
-            try:
-                with engine.connect() as connection:
-                    # Use VARCHAR without a length for PostgreSQL, which maps to `text`.
-                    # For SQLite, it will also work.
-                    connection.execute(text('ALTER TABLE polls ADD COLUMN web_app_id VARCHAR'))
-                    # For SQLAlchemy 2.0 style with Connection, commit is often needed for DDL
-                    if connection.engine.dialect.name != 'sqlite':
-                        connection.commit()
-                logger.info("MIGRATION: Successfully added 'web_app_id' column.")
-            except Exception as e:
-                logger.error(f"MIGRATION FAILED for 'web_app_id': {e}")
+
+    try:
+        with engine.connect() as connection:
+            # Use VARCHAR without a length for PostgreSQL, which maps to `text`.
+            # For SQLite, it will also work.
+            connection.execute(text('ALTER TABLE polls ADD COLUMN web_app_id VARCHAR'))
+            # For SQLAlchemy 2.0 style with Connection, commit is often needed for DDL
+            if connection.engine.dialect.name != 'sqlite':
+                connection.commit()
+        logger.info("MIGRATION: Successfully added 'web_app_id' column.")
+    except Exception as e:
+        logger.error(f"MIGRATION FAILED for 'web_app_id': {e}")
 
         # --- Migration 2: Remove the now-obsolete web_apps table ---
         if inspector.has_table("web_apps"):
@@ -162,11 +163,25 @@ class PollExclusion(Base):
                 logger.info("MIGRATION: Successfully dropped 'web_apps' table.")
             except Exception as e:
                 logger.error(f"MIGRATION FAILED for dropping 'web_apps' table: {e}")
+                try:
+                    # Attempt to roll back the migration
+                    connection.rollback()
+                except Exception as rollback_e:
+                    logger.error(f"Failed to roll back migration: {rollback_e}")
 
         # --- Migration 3: Fix responses table primary key for multiple selections ---
         if 'responses' in inspector.get_table_names():
             logger.info("MIGRATION: Checking responses table primary key...")
             try:
+                # No specific migration needed for multiple selections yet
+                pass
+            except Exception as e:
+                logger.error(f"MIGRATION FAILED for responses table: {e}")
+                try:
+                    # Attempt to roll back the migration
+                    connection.rollback()
+                except Exception as rollback_e:
+                    logger.error(f"Failed to roll back migration: {rollback_e}")
 
 
 def update_user(session: Session, user_id: int, first_name: str, last_name: str, username: str = None):
