@@ -61,8 +61,28 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
                 poll.message_id = new_msg.message_id
                 poll.photo_file_id = new_msg.photo[-1].file_id if new_msg.photo else None
             elif poll.photo_file_id:
-                # есть фото, но мы не обновляем его – меняем подпись
-                await context.bot.edit_message_caption(chat_id=poll.chat_id, message_id=poll.message_id, caption=new_caption, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
+                # Сообщение уже содержит фото. Если сгенерировано новое изображение —
+                # заменяем медиаконтент, иначе обновляем только подпись.
+                if new_image:
+                    media = InputMediaPhoto(media=new_image, caption=new_caption, parse_mode=ParseMode.MARKDOWN_V2)
+                    await context.bot.edit_message_media(
+                        chat_id=poll.chat_id,
+                        message_id=poll.message_id,
+                        media=media,
+                        reply_markup=reply_markup,
+                    )
+                    # После успешного обновления медиа можно попробовать извлечь file_id,
+                    # но API не возвращает его напрямую. Оставляем прежний, чтобы в
+                    # дальнейшем всё равно пытаться редактировать без пересылки.
+                else:
+                    # Изображение не изменилось — правим только подпись.
+                    await context.bot.edit_message_caption(
+                        chat_id=poll.chat_id,
+                        message_id=poll.message_id,
+                        caption=new_caption,
+                        reply_markup=reply_markup,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                    )
             else:
                 # обычное текстовое сообщение
                 await context.bot.edit_message_text(text=new_caption, chat_id=poll.chat_id, message_id=poll.message_id, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)

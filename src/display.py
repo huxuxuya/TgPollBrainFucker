@@ -173,8 +173,10 @@ def generate_poll_content(poll_id: int = None, poll: Optional[db.Poll] = None, s
         # --- Image Generation ---
         show_heatmap = poll_setting.show_heatmap if poll_setting is not None else True
         image_bytes = None
-        # Generate heatmap only if there are votes and the setting is enabled
-        if responses and show_heatmap:
+        # Генерируем тепловую карту, даже если пока нет голосов —
+        # это позволит сразу отправлять опрос фотографией и затем
+        # обновлять изображение «на месте», без удаления сообщения.
+        if show_heatmap:
             image_bytes = generate_results_heatmap_image(
                 poll_id=poll_id,
                 session=session
