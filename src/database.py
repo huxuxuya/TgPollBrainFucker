@@ -81,6 +81,8 @@ class PollSetting(Base):
     default_show_names = Column(Boolean, default=True)
     default_show_count = Column(Boolean, default=True)
     show_heatmap = Column(Boolean, default=True, nullable=False)
+    # Whether to include textual results together with heatmap
+    show_text_results = Column(Boolean, default=True, nullable=False)
     default_names_style = Column(String, default='list')
     target_sum = Column(Float, default=0)
     nudge_negative_emoji = Column(String, default='❌')

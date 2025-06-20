@@ -120,7 +120,8 @@ async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: Co
     title = poll.message or f"Опрос {poll.poll_id}"
     text = f"⚙️ *Общие настройки опроса: «{escape_markdown(title, 2)}»*\n\n" \
            f"Несколько ответов: {'Да' if multiple_answers else 'Нет'}\n" \
-           f"Показывать тепловую карту: {'Да' if poll_setting.show_heatmap else 'Нет'}"
+           f"Показывать тепловую карту: {'Да' if poll_setting.show_heatmap else 'Нет'}\n" \
+           f"Текстовый вывод результатов: {'Да' if poll_setting.show_text_results else 'Нет'}"
 
     kb = [
         [
@@ -129,6 +130,7 @@ async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: Co
         ],
         [InlineKeyboardButton(f"Несколько ответов: {'✅' if multiple_answers else '❌'}", callback_data=f"settings:toggle_setting:{poll_id}:allow_multiple_answers")],
         [InlineKeyboardButton(f"Тепловая карта: {'✅' if poll_setting.show_heatmap else '❌'}", callback_data=f"settings:toggle_setting:{poll_id}:show_heatmap")],
+        [InlineKeyboardButton(f"Текстовый вывод: {'✅' if poll_setting.show_text_results else '❌'}", callback_data=f"settings:toggle_setting:{poll_id}:show_text_results")],
         [InlineKeyboardButton("⚙️ Настроить варианты ответов", callback_data=f"settings:poll_options_menu:{poll_id}")],
         [InlineKeyboardButton("📢 Эмодзи для напоминаний", callback_data=f"settings:ask_text:{poll_id}:nudge_negative_emoji")],
         [InlineKeyboardButton("🚫 Исключить участников", callback_data=f"settings:excl_menu:{poll_id}:0")],
@@ -317,6 +319,9 @@ async def show_poll_exclusion_menu(query: CallbackQuery, context: ContextTypes.D
         participants = db.get_participants(poll.chat_id, session=session)
         excluded_ids = db.get_poll_exclusions(poll_id, session=session)
 
+        # Сначала показываем исключённых, затем остальных (по алфавиту внутри групп)
+        participants.sort(key=lambda p: (p.user_id not in excluded_ids, db.get_user_name(session, p.user_id).lower()))
+
         total_pages = max(1, math.ceil(len(participants) / PAGE_SIZE))
         page = max(0, min(page, total_pages - 1))
 
@@ -332,7 +337,13 @@ async def show_poll_exclusion_menu(query: CallbackQuery, context: ContextTypes.D
             icon = "🚫" if is_exc else "✅"
             text_lines.append(f"{icon} {name}")
                         # Кнопка показывает значок и имя участника
-            button_label = f"{icon} " + db.get_user_name(session, p.user_id, markdown_link=False)[:32]
+            name_plain = db.get_user_name(session, p.user_id, markdown_link=False)
+            uname_part = f" (@{p.username})" if p.username else ""
+            label_name = f"{name_plain}{uname_part}"
+            # Ограничиваем длину, чтобы кнопка оставалась компактной
+            if len(label_name) > 32:
+                label_name = label_name[:29] + '…'
+            button_label = f"{icon} {label_name}"
             kb_rows.append([InlineKeyboardButton(button_label, callback_data=f"settings:toggle_excl:{poll_id}:{p.user_id}:{page}")])
 
         # Навигация
@@ -355,9 +366,18 @@ from src.display import generate_nudge_text
 async def toggle_exclude_in_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_id: int, user_id: int, page: int):
     """Переключает исключение участника и возвращает в меню."""
     excluded = db.toggle_poll_exclusion(poll_id, user_id)
-    await query.answer("Исключён" if excluded else "Включён", show_alert=False)
+    user_name = db.get_user_name(None, user_id)
+    await query.answer(f"Исключён {user_name}" if excluded else f"Включён {user_name}", show_alert=False)
     # Обновляем меню той же страницы
     await show_poll_exclusion_menu(query, context, poll_id, page)
+
+    # --- Если черновик, обновляем предпросмотр в личке ---
+    if poll and poll.status == 'draft':
+        user_chat_id = query.message.chat_id  # личный чат пользователя
+        preview_id = context.user_data.get('draft_previews', {}).get(poll_id)
+        if preview_id:
+            from src.handlers import results as results_handlers
+            await results_handlers.show_draft_poll_menu(context, poll_id, user_chat_id, preview_id)
 
     # --- Refresh nudge message, if any ---
     poll = db.get_poll(poll_id)

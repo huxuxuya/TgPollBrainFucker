@@ -17,7 +17,7 @@ async def show_draft_poll_menu(context: ContextTypes.DEFAULT_TYPE, poll_id: int,
         await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="Ошибка: созданный опрос не найден.")
         return
 
-    text, _ = generate_poll_content(poll_id)
+    text, image_bytes = generate_poll_content(poll_id)
     kb_rows = [
         [
             InlineKeyboardButton("▶️ Запустить", callback_data=f"dash:start_poll:{poll_id}"),
@@ -30,13 +30,29 @@ async def show_draft_poll_menu(context: ContextTypes.DEFAULT_TYPE, poll_id: int,
     reply_markup = InlineKeyboardMarkup(kb_rows)
     
     try:
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=message_id,
-            text=text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
+        # Сохраняем id сообщения-превью для последующего обновления
+        context.user_data.setdefault('draft_previews', {})[poll_id] = message_id
+
+        if image_bytes:
+            # Если исходное сообщение уже с фото
+            if context.bot.get_chat(chat_id).id == chat_id and (await context.bot.get_message(chat_id, message_id)).photo:
+                media = InputMediaPhoto(media=image_bytes, caption=text, parse_mode=ParseMode.MARKDOWN_V2)
+                await context.bot.edit_message_media(chat_id=chat_id, message_id=message_id, media=media, reply_markup=reply_markup)
+            else:
+                # Удаляем старое сообщение и шлём фото-превью
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                except Exception:
+                    pass
+                await context.bot.send_photo(chat_id=chat_id, photo=image_bytes, caption=text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
+        else:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN_V2
+            )
     except telegram.error.BadRequest as e:
         if "Message is not modified" not in str(e):
             logger.error(f"Error showing draft poll menu for poll {poll_id}: {e}")

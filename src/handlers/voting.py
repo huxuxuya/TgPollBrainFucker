@@ -36,7 +36,25 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
         kb = []
         if poll.poll_type == 'native' and poll.options:
             options = poll.options.split(',')
-            kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+            kb = []
+            current_row = []
+            MAX_PER_ROW = 3
+            SHORT_LEN = 15
+            for i, opt in enumerate(options):
+                text = opt.strip()
+                btn = InlineKeyboardButton(text, callback_data=f'vote:{poll.poll_id}:{i}')
+                if len(text) <= SHORT_LEN:
+                    current_row.append(btn)
+                    if len(current_row) == MAX_PER_ROW:
+                        kb.append(current_row)
+                        current_row = []
+                else:
+                    if current_row:
+                        kb.append(current_row)
+                        current_row = []
+                    kb.append([btn])
+            if current_row:
+                kb.append(current_row)
         elif poll.poll_type == 'webapp' and poll.web_app_id:
             url = f"{WEB_URL}/web_apps/{poll.web_app_id}/?poll_id={poll.poll_id}"
             kb = [[InlineKeyboardButton("⚜️ Голосовать в приложении", web_app=WebAppInfo(url=url))]]

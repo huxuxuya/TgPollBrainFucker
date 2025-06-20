@@ -175,6 +175,7 @@ def generate_poll_content(poll_id: int = None, poll: Optional[db.Poll] = None, s
         
         # --- Image Generation ---
         show_heatmap = poll_setting.show_heatmap if poll_setting is not None else True
+        show_text_results = poll_setting.show_text_results if poll_setting is not None else True
         image_bytes = None
         # Генерируем тепловую карту, даже если пока нет голосов —
         # это позволит сразу отправлять опрос фотографией и затем
@@ -191,6 +192,10 @@ def generate_poll_content(poll_id: int = None, poll: Optional[db.Poll] = None, s
             db.safe_commit(session)
         
         logger.info(f"[DEBUG] Final poll text for poll {poll_id}:\n{final_text}")
+        # If text results are disabled while heatmap is shown, keep only title and voters count.
+        if show_heatmap and not show_text_results:
+            safe_title = escape_markdown(message, version=2)
+            final_text = f"{safe_title}\n\nВсего проголосовало: *{total_voters}*"
         return final_text, image_bytes
     finally:
         # Only close the session if we created it here.

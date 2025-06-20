@@ -136,7 +136,20 @@ async def start_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, p
                 await query.answer('Ошибка: опрос содержит пустые или некорректные варианты ответов. Пожалуйста, отредактируйте их в настройках.', show_alert=True)
                 return
             options = poll.options.split(',')
-            kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+            options = poll.options.split(',')
+            kb = []
+            row = []
+            for i, opt in enumerate(options):
+                row.append(
+                    InlineKeyboardButton(opt.strip(),
+                                         callback_data=f'vote:{poll.poll_id}:{i}')
+                )
+                # группируем по 3 кнопки в строке
+                if len(row) == 3:
+                    kb.append(row)
+                    row = []
+            if row:
+                kb.append(row)
         elif poll.poll_type == 'webapp':
             if not poll.web_app_id:
                 await query.answer('Ошибка: для этого опроса не задан ID веб-приложения.', show_alert=True)
@@ -256,7 +269,18 @@ async def reopen_poll(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, 
         kb = []
         if poll.poll_type == 'native':
             options = poll.options.split(',')
-            kb = [[InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')] for i, opt in enumerate(options)]
+            kb = []
+            row = []
+            for i, opt in enumerate(options):
+                row.append(
+                    InlineKeyboardButton(opt.strip(), callback_data=f'vote:{poll.poll_id}:{i}')
+                )
+                # group buttons by 3 per row
+                if len(row) == 3:
+                    kb.append(row)
+                    row = []
+            if row:
+                kb.append(row)
         elif poll.poll_type == 'webapp':
             if not poll.web_app_id:
                 await query.answer('Ошибка: для этого опроса не задан ID веб-приложения.', show_alert=True)
@@ -569,15 +593,30 @@ async def show_exclude_menu(query: CallbackQuery, chat_id: int, page: int = 0):
         paginated_participants = participants[start_index:end_index]
         total_pages = -(-len(participants) // items_per_page)
 
-        text = f'👥 *Исключение/возврат \\(«{title}»\\)* \\(Стр\\. {page + 1}/{total_pages}\\):\nНажмите на участника, чтобы изменить его статус.'
+        text = f'👥 *Исключение/возврат \\(«{title}»\\)* \\(Стр\\. {page + 1}/{total_pages}\\):\\.\nНажмите на участника, чтобы изменить его статус\.'
         
         kb = []
+        current_row = []
+        MAX_PER_ROW = 3  # up to 3 short buttons per row
+        SHORT_LEN = 15   # threshold to treat button as short
         for p in paginated_participants:
             name = db.get_user_name(session, p.user_id)
             status_icon = "🚫" if p.excluded else "✅"
             button_text = f"{status_icon} {name}"
             callback_data = f"dash:toggle_exclude:{chat_id}:{p.user_id}:{page}"
-            kb.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+            btn = InlineKeyboardButton(button_text, callback_data=callback_data)
+            if len(button_text) <= SHORT_LEN:
+                current_row.append(btn)
+                if len(current_row) == MAX_PER_ROW:
+                    kb.append(current_row)
+                    current_row = []
+            else:
+                if current_row:
+                    kb.append(current_row)
+                    current_row = []
+                kb.append([btn])
+        if current_row:
+            kb.append(current_row)
         
         nav_buttons = []
         if page > 0: nav_buttons.append(InlineKeyboardButton("⬅️", callback_data=f"dash:exclude_menu:{chat_id}:{page-1}"))
@@ -590,15 +629,43 @@ async def show_exclude_menu(query: CallbackQuery, chat_id: int, page: int = 0):
     finally:
         session.close()
 
-async def toggle_exclude_participant(query: CallbackQuery, chat_id: int, user_id: int, page: int):
+async def toggle_exclude_participant(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, page: int):
     """Toggles the 'excluded' status for a participant."""
     session = db.SessionLocal()
     try:
-        participant = db.get_participant(session, chat_id, user_id)
+        participant = session.query(db.Participant).filter_by(chat_id=chat_id, user_id=user_id).first()
         if participant:
             participant.excluded = not participant.excluded
             session.commit()
             await show_exclude_menu(query, chat_id, page)
+
+            # --- Refresh nudge messages for active polls in this chat ---
+            from src.display import generate_nudge_text
+            polls = session.query(db.Poll).filter_by(chat_id=chat_id, status='active').all()
+            for poll in polls:
+                nudge_text = await generate_nudge_text(poll.poll_id)
+                try:
+                    if poll.nudge_message_id:
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=poll.nudge_message_id,
+                            text=nudge_text,
+                            parse_mode=ParseMode.MARKDOWN_V2,
+                        )
+                        if "Все участники проголосовали" in nudge_text:
+                            poll.nudge_message_id = None
+                    else:
+                        if "Все участники проголосовали" not in nudge_text:
+                            new_msg = await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=nudge_text,
+                                parse_mode=ParseMode.MARKDOWN_V2,
+                            )
+                            poll.nudge_message_id = new_msg.message_id
+                    session.commit()
+                except BadRequest as e:
+                    if "Message is not modified" not in str(e):
+                        logger.warning(f"Failed to update nudge for poll {poll.poll_id}: {e}")
         else:
             await query.answer("Участник не найден.", show_alert=True)
     finally:
@@ -687,7 +754,7 @@ async def dashboard_callback_handler(update: Update, context: ContextTypes.DEFAU
     elif command == "participants_menu": await show_participants_menu(query, int(params[0]))
     elif command == "participants_list": await show_participants_list(query, int(params[0]), int(params[1]))
     elif command == "exclude_menu": await show_exclude_menu(query, int(params[0]), int(params[1]))
-    elif command == "toggle_exclude": await toggle_exclude_participant(query, int(params[0]), int(params[1]), int(params[2]))
+    elif command == "toggle_exclude": await toggle_exclude_participant(query, context, int(params[0]), int(params[1]), int(params[2]))
     elif command == "clean_participants": await clean_participants(query, int(params[0]))
     elif command == "add_user_fw_start": await add_user_via_forward_start(query, context, int(params[0]))
     elif command == "start_poll": await start_poll(query, context, int(params[0]))

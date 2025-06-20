@@ -48,11 +48,13 @@ COLOR_TEXT = (20, 20, 20)
 COLOR_VOTE_YES = (99, 201, 115)        # более мягкий зелёный
 COLOR_VOTE_NO = (245, 245, 245)        # Light Grey
 COLOR_EXCLUDED_ROW = (255, 235, 238)   # Light Red for the entire row of an excluded user
+COLOR_VOTE_EXCLUDED = (255, 183, 74)   # Orange highlight for votes cast by excluded users
 
 # Layout
 CELL_HEIGHT = 38
 MIN_CELL_WIDTH = 130
 NAME_COLUMN_WIDTH = 240
+NUMBER_COL_WIDTH = 32  # width reserved for row numbers
 PADDING = 18
 
 def _wrap_text(text, font, max_width):
@@ -132,7 +134,7 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
             logger.warning(f"Not enough data for heatmap poll {poll_id}")
             return None
 
-        votes = {(r.user_id, r.response.strip()): True for r in responses}
+        # votes dict already built above based on visible participants
         
         # Проставляем флаги excluded для poll-specific исключений
         poll_excl_ids = db.get_poll_exclusions(poll_id, session=session)
@@ -142,8 +144,21 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
                 try:
                     participants[idx] = p._replace(excluded=1)
                 except AttributeError:
-                    # p может быть ORM-объектом Participant – у него атрибут изменяемый
+                    # ORM-объект Participant – у него атрибут изменяемый
                     setattr(p, 'excluded', 1)
+
+        # --- Build final participant list ---
+        # 1. Добавляем все не-исключённые.
+        # 2. Добавляем исключённых только если они голосовали.
+        respondent_ids = {r.user_id for r in responses}
+        participants = [
+            p for p in participants
+            if (not getattr(p, 'excluded', False)) or (p.user_id in respondent_ids)
+        ]
+        visible_user_ids = {p.user_id for p in participants}
+
+        # Re-build the votes map so that only rows present on the heatmap are considered
+        votes = {(r.user_id, r.response.strip()): True for r in responses if r.user_id in visible_user_ids}
 
         # --- Calculate Dimensions & Prepare Canvas ---
         # --- Prepare question text (poll title) ---
@@ -185,8 +200,11 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
                 cur_y += line_height + 2
 
         # --- Определяем лидирующий вариант ---
+        # Пересчитываем количество голосов по оставшимся (неисключённым) участникам
         option_counts = {opt: 0 for opt in options}
         for r in responses:
+            if r.user_id not in visible_user_ids:
+                continue
             resp = r.response.strip()
             if resp in option_counts:
                 option_counts[resp] += 1
@@ -229,14 +247,20 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
             radius = 14 if p_idx in (0, len(participants)-1) else 0
             _draw_rounded_rectangle(draw, (PADDING, y, image_width - PADDING, y + CELL_HEIGHT), radius=radius, fill=row_bg)
             # Имя
+            # Draw row number
+            row_number_text = str(p_idx + 1)
+            draw.text((PADDING + 5, y + (CELL_HEIGHT // 2) - 8), row_number_text, font=FONT_REGULAR, fill=COLOR_TEXT)
+
+            # Prepare and draw user name shifted right to leave space for number
             user_name = db.get_user_name(session, participant.user_id)
             if participant.username and f"@{participant.username}" not in user_name:
                 user_name = f"{user_name} (@{participant.username})"
-            if FONT_REGULAR.getlength(user_name) > NAME_COLUMN_WIDTH - 10:
-                while FONT_REGULAR.getlength(user_name + '…') > NAME_COLUMN_WIDTH - 10 and len(user_name) > 1:
+            max_name_width = NAME_COLUMN_WIDTH - NUMBER_COL_WIDTH - 10
+            if FONT_REGULAR.getlength(user_name) > max_name_width:
+                while FONT_REGULAR.getlength(user_name + '…') > max_name_width and len(user_name) > 1:
                     user_name = user_name[:-1]
                 user_name += '…'
-            draw.text((PADDING + 5, y + (CELL_HEIGHT // 2) - 8), user_name, font=FONT_REGULAR, fill=COLOR_TEXT)
+            draw.text((PADDING + 5 + NUMBER_COL_WIDTH, y + (CELL_HEIGHT // 2) - 8), user_name, font=FONT_REGULAR, fill=COLOR_TEXT)
             # Ячейки голосов
             for o_idx, option_text in enumerate(options):
                 x = PADDING + NAME_COLUMN_WIDTH + (o_idx * MIN_CELL_WIDTH)
@@ -248,7 +272,11 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
                 else:
                     intensity = 80
                 if voted:
-                    cell_color = (99, 201, 115, intensity)
+                    if participant.excluded:
+                        # Постоянный оранжевый цвет для голосов исключённых участников
+                        cell_color = (*COLOR_VOTE_EXCLUDED, 220)
+                    else:
+                        cell_color = (99, 201, 115, intensity)
                 else:
                     cell_color = (245, 245, 245, 180)
                 # Скругление только у первой/последней строки и первой/последней колонки
@@ -268,7 +296,10 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
             y_pos = PADDING + header_height + (i * CELL_HEIGHT)
             draw.line([(PADDING, y_pos), (image_width - PADDING, y_pos)], fill=(220,220,220,120))
         # Bolder separator for names
+        # Vertical separator after number+name column
         draw.line([(PADDING + NAME_COLUMN_WIDTH, PADDING), (PADDING + NAME_COLUMN_WIDTH, image_height - PADDING)], fill=(190,190,190,180), width=2)
+        # Optional thinner separator between number and name
+        draw.line([(PADDING + NUMBER_COL_WIDTH, PADDING + header_height), (PADDING + NUMBER_COL_WIDTH, image_height - PADDING)], fill=(220,220,220,120))
         # Outer border
         _draw_rounded_rectangle(draw, (PADDING, PADDING, image_width - PADDING, image_height - PADDING), radius=18, outline=(190,190,190,200), width=3)
         # --- Finalize ---
