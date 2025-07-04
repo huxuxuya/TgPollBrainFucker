@@ -602,7 +602,8 @@ async def show_exclude_menu(query: CallbackQuery, chat_id: int, page: int = 0):
         for p in paginated_participants:
             name = db.get_user_name(session, p.user_id)
             status_icon = "🚫" if p.excluded else "✅"
-            button_text = f"{status_icon} {name}"
+            username_part = f" (@{p.username})" if p.username else ""
+            button_text = f"{status_icon} {name}{username_part}"
             callback_data = f"dash:toggle_exclude:{chat_id}:{p.user_id}:{page}"
             btn = InlineKeyboardButton(button_text, callback_data=callback_data)
             if len(button_text) <= SHORT_LEN:

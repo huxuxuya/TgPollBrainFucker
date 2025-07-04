@@ -10,13 +10,14 @@ from src.display import generate_poll_content, generate_nudge_text
 from src.drawing import generate_results_heatmap_image
 
 async def show_draft_poll_menu(context: ContextTypes.DEFAULT_TYPE, poll_id: int, chat_id: int, message_id: int):
-    """Displays the management menu for a newly created draft poll."""
+    """Displays the management menu for a newly created draft poll with heatmap preview."""
     poll = db.get_poll(poll_id)
     if not poll:
         # This should not happen in the normal flow
         await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="Ошибка: созданный опрос не найден.")
         return
 
+    # Generate both text and heatmap image
     text, image_bytes = generate_poll_content(poll_id)
     kb_rows = [
         [
@@ -30,22 +31,45 @@ async def show_draft_poll_menu(context: ContextTypes.DEFAULT_TYPE, poll_id: int,
     reply_markup = InlineKeyboardMarkup(kb_rows)
     
     try:
-        # Сохраняем id сообщения-превью для последующего обновления
+        # Save the message ID for future updates
         context.user_data.setdefault('draft_previews', {})[poll_id] = message_id
 
+        # If we have a heatmap image to show
         if image_bytes:
-            # Если исходное сообщение уже с фото
-            if context.bot.get_chat(chat_id).id == chat_id and (await context.bot.get_message(chat_id, message_id)).photo:
+            try:
+                # Try to edit the existing message to add the photo
                 media = InputMediaPhoto(media=image_bytes, caption=text, parse_mode=ParseMode.MARKDOWN_V2)
-                await context.bot.edit_message_media(chat_id=chat_id, message_id=message_id, media=media, reply_markup=reply_markup)
-            else:
-                # Удаляем старое сообщение и шлём фото-превью
+                await context.bot.edit_message_media(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    media=media,
+                    reply_markup=reply_markup
+                )
+                # Update the caption separately in case the edit_media didn't update it
+                await context.bot.edit_message_caption(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    caption=text,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
+            except Exception as e:
+                logger.warning(f"Couldn't edit message with photo, sending new one: {e}")
                 try:
+                    # If editing fails, try to delete the old message and send a new one
                     await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
                 except Exception:
                     pass
-                await context.bot.send_photo(chat_id=chat_id, photo=image_bytes, caption=text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN_V2)
+                # Send new message with photo
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=image_bytes,
+                    caption=text,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.MARKDOWN_V2
+                )
         else:
+            # Fallback to text-only if no image is available
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,

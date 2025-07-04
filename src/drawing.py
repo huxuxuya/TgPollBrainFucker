@@ -268,15 +268,16 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
                 # Градиент по количеству голосов за вариант
                 votes_for_option = option_counts[option_text]
                 if max_votes > 0:
-                    intensity = int(80 + 120 * (votes_for_option / max_votes))
+                    norm = votes_for_option / max_votes
+                    intensity = int(40 + 215 * (norm ** 1.7))  # Квадратичная шкала для контраста
                 else:
-                    intensity = 80
+                    intensity = 40
                 if voted:
                     if participant.excluded:
                         # Постоянный оранжевый цвет для голосов исключённых участников
                         cell_color = (*COLOR_VOTE_EXCLUDED, 220)
                     else:
-                        cell_color = (99, 201, 115, intensity)
+                        cell_color = (99, 201, 115, intensity)  # Вернул прежний зелёный цвет
                 else:
                     cell_color = (245, 245, 245, 180)
                 # Скругление только у первой/последней строки и первой/последней колонки
