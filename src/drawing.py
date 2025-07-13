@@ -21,21 +21,43 @@ def _load_font(name_candidates, size):
 
 # Попытка загрузить шрифт с поддержкой кириллицы.
 FONT_REGULAR = _load_font([
+    "/System/Library/Fonts/Supplemental/Arial.ttf",  # macOS
     "arial.ttf",  # Windows / пользователь может установить
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "DejaVuSans.ttf",
 ], 15)
 
 FONT_BOLD = _load_font([
-    "arialbd.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",  # macOS (если есть)
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "DejaVuSans-Bold.ttf",
+    "arialbd.ttf",
 ], 16)
 
 if FONT_REGULAR is None or FONT_BOLD is None:
     logger.warning("Fallback to default PIL font; Cyrillic glyphs may look poor.")
     FONT_REGULAR = FONT_REGULAR or ImageFont.load_default()
     FONT_BOLD = FONT_BOLD or ImageFont.load_default()
+
+def get_system_font(size=20):
+    """
+    Возвращает объект ImageFont с поддержкой кириллицы для Mac, Windows и Linux.
+    Если подходящий ttf-шрифт не найден — возвращает стандартный PIL-шрифт.
+    """
+    possible_paths = [
+        "/System/Library/Fonts/Supplemental/Arial.ttf",  # macOS
+        # Windows
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/ARIAL.TTF",
+        # Linux (часто ставят DejaVuSans)
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    print("WARNING: Не найден подходящий ttf-шрифт, используем стандартный PIL-шрифт (кириллица будет отображаться некорректно)")
+    return ImageFont.load_default()
 
 # Colors
 COLOR_BG = (255, 255, 255)
@@ -223,7 +245,7 @@ def generate_results_heatmap_image(poll_id: int, session: Optional[db.Session] =
                 except Exception:
                     emoji = None
             if emoji:
-                draw.text((x + 40, line_y), emoji, font=ImageFont.truetype("arial.ttf", 28), fill=(0,0,0,255))
+                draw.text((x + 40, line_y), emoji, font=get_system_font(28), fill=(0,0,0,255))
                 line_y += 32
             for line in option_text_lines:
                 draw.text((x + 8, line_y), line, font=FONT_BOLD, fill=COLOR_TEXT)

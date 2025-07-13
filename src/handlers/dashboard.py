@@ -716,6 +716,7 @@ async def delete_poll_execute(query: CallbackQuery, poll_id: int):
 async def show_admin_panel(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE):
     """Shows the admin panel with admin-only commands."""
     text = "⚙️ *Панель администратора*\n\nЗдесь собраны команды для управления ботом."
+    text = escape_markdown(text, version=2)
     kb = [
         [InlineKeyboardButton("📤 Экспорт данных (JSON)", callback_data="dash:admin_export_json")],
         [InlineKeyboardButton("📥 Инструкция по импорту (JSON)", callback_data="dash:admin_import_info")],
