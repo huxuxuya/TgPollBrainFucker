@@ -116,10 +116,12 @@ async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: Co
 
     poll_setting = db.get_poll_setting(poll_id, create=True)
     multiple_answers = poll_setting.allow_multiple_answers
+    target_sum = poll_setting.target_sum if poll_setting and poll_setting.target_sum is not None else 0
 
     title = poll.message or f"Опрос {poll.poll_id}"
     text = f"⚙️ *Общие настройки опроса: «{escape_markdown(title, 2)}»*\n\n" \
            f"Несколько ответов: {'Да' if multiple_answers else 'Нет'}\n" \
+           f"Целевая сумма сбора: {target_sum if target_sum else 'не задана'}\n" \
            f"Показывать тепловую карту: {'Да' if poll_setting.show_heatmap else 'Нет'}\n" \
            f"Текстовый вывод результатов: {'Да' if poll_setting.show_text_results else 'Нет'}"
 
@@ -129,6 +131,7 @@ async def show_poll_settings_menu(query: Union[CallbackQuery, None], context: Co
             InlineKeyboardButton("📝 Варианты", callback_data=f"settings:ask_text:{poll_id}:options")
         ],
         [InlineKeyboardButton(f"Несколько ответов: {'✅' if multiple_answers else '❌'}", callback_data=f"settings:toggle_setting:{poll_id}:allow_multiple_answers")],
+        [InlineKeyboardButton(f"Целевая сумма: {target_sum if target_sum else 'не задана'}", callback_data=f"settings:ask_text:{poll_id}:target_sum")],
         [InlineKeyboardButton(f"Тепловая карта: {'✅' if poll_setting.show_heatmap else '❌'}", callback_data=f"settings:toggle_setting:{poll_id}:show_heatmap")],
         [InlineKeyboardButton(f"Текстовый вывод: {'✅' if poll_setting.show_text_results else '❌'}", callback_data=f"settings:toggle_setting:{poll_id}:show_text_results")],
         [InlineKeyboardButton("⚙️ Настроить варианты ответов", callback_data=f"settings:poll_options_menu:{poll_id}")],
@@ -203,11 +206,15 @@ async def text_input_for_setting(query: CallbackQuery, context: ContextTypes.DEF
     context.user_data['wizard_setting_key'] = setting_key
     if query.message:
         context.user_data['wizard_message_id'] = query.message.message_id
-        
+        context.user_data['message_to_edit'] = query.message.message_id  # Для совместимости с text_handler
+    # Логируем user_data для отладки
+    from src.config import logger
+    logger.info(f"[DEBUG] text_input_for_setting: poll_id={poll_id}, setting_key={setting_key}, user_data={dict(context.user_data)}")
     text_map = {
         "message": "Введите новый заголовок опроса:",
         "options": "Введите новые варианты, разделенные запятой (или каждый на новой строке):",
         "nudge_negative_emoji": "Введите новый эмодзи для 'не проголосовал':",
+        "target_sum": "Введите новую целевую сумму сбора (только число, 0 чтобы сбросить):",
     }
     cancel_cb = f"settings:poll_menu:{poll_id}"
     text = text_map.get(setting_key, "Введите новое значение:")
@@ -244,20 +251,27 @@ async def settings_callback_handler(update: Update, context: ContextTypes.DEFAUL
     # Run as a background task to avoid blocking on network issues.
     asyncio.create_task(query.answer())
     
-    logger.info(f"settings_callback_handler: data={query.data}")
+    from src.config import logger
+    logger.info(f"[DEBUG] settings_callback_handler: data={query.data}, user_data={dict(context.user_data)}")
     
     parts = query.data.split(':')
     command = parts[1]
     poll_id = int(parts[2])
+    logger.info(f"[DEBUG] settings_callback_handler: command={command}, poll_id={poll_id}, parts={parts}")
 
     if command == "poll_menu":
+        logger.info(f"[DEBUG] settings_callback_handler: entering show_poll_settings_menu for poll_id={poll_id}")
         await show_poll_settings_menu(query, context, poll_id)
     elif command == "poll_options_menu":
+        logger.info(f"[DEBUG] settings_callback_handler: entering show_poll_options_settings_menu for poll_id={poll_id}")
         await show_poll_options_settings_menu(query, context, poll_id)
     elif command == "option_menu":
+        logger.info(f"[DEBUG] settings_callback_handler: entering show_single_option_settings_menu for poll_id={poll_id}, option_index={int(parts[3])}")
         await show_single_option_settings_menu(query, context, poll_id, int(parts[3]))
     elif command == "ask_text":
-        await text_input_for_setting(query, context, poll_id, parts[3])
+        setting_key = parts[3]
+        logger.info(f"[DEBUG] settings_callback_handler: entering text_input_for_setting for poll_id={poll_id}, setting_key={setting_key}")
+        await text_input_for_setting(query, context, poll_id, setting_key)
     elif command == "ask_option_text":
         await text_input_for_option_setting(query, context, poll_id, int(parts[3]), parts[4])
     elif command == "toggle_setting":

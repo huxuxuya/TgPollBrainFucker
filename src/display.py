@@ -7,12 +7,16 @@ from .drawing import generate_results_heatmap_image
 from typing import Optional, Tuple
 from sqlalchemy.orm import Session
 
-def get_progress_bar(progress, total, length=20):
+def get_progress_bar(progress, total, length=40):
     if total <= 0: return "\\[\\]", 0
     percent = progress / total
     filled_length = int(length * percent)
-    bar = '█' * filled_length + '░' * (length - filled_length)
-    return f"\\[{bar}\\]", percent * 100
+    bar = '|' * filled_length + '.' * (length - filled_length)
+    # Импортируем escape_markdown из src/handlers/text.py
+    from src.handlers.text import escape_markdown
+    # Экранируем прогрессбар для MarkdownV2
+    bar_escaped = escape_markdown(str(bar))
+    return f"\\[{bar_escaped}\\]", percent * 100
 
 def generate_poll_content(poll_id: int = None, poll: Optional[db.Poll] = None, session: Optional[Session] = None) -> Tuple[str, Optional[io.BytesIO]]:
     """

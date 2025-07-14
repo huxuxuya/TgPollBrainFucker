@@ -11,18 +11,24 @@ from src import database as db
 from src.config import logger, WEB_URL, BOT_OWNER_ID
 from src.display import generate_poll_content
 from src.handlers import admin
+from src.poll_modules import get_poll_modules
 
 async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     """Starts the poll creation wizard by asking for the poll type."""
     context.user_data['wizard_chat_id'] = chat_id
     context.user_data['message_to_edit'] = query.message.message_id # Save message ID
-    
-    keyboard = [
-        [InlineKeyboardButton("📊 Обычный опрос (кнопки в чате)", callback_data=f"dash:wizard_set_type:native:{chat_id}")],
-        [InlineKeyboardButton("🌐 Web App опрос (отдельная страница)", callback_data=f"dash:wizard_set_type:webapp:{chat_id}")],
-        [InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")]
-    ]
-    
+
+    poll_modules = get_poll_modules()
+    keyboard = []
+    # Добавляем стандартные типы
+    keyboard.append([InlineKeyboardButton("📊 Обычный опрос (кнопки в чате)", callback_data=f"dash:wizard_set_type:native:{chat_id}")])
+    keyboard.append([InlineKeyboardButton("🌐 Web App опрос (отдельная страница)", callback_data=f"dash:wizard_set_type:webapp:{chat_id}")])
+    # Добавляем внешние типы из модулей
+    for poll_type, module in poll_modules.items():
+        if poll_type not in ("native", "webapp"):
+            keyboard.append([InlineKeyboardButton(module.display_name, callback_data=f"dash:wizard_set_type:{poll_type}:{chat_id}")])
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data=f"dash:group:{chat_id}")])
+
     await query.edit_message_text(
         "Выберите тип опроса, который хотите создать:",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -31,7 +37,15 @@ async def wizard_start(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE,
 async def wizard_set_type(query: CallbackQuery, context: ContextTypes.DEFAULT_TYPE, poll_type: str, chat_id: int):
     """Handles the poll type selection and proceeds to the next step."""
     context.user_data['wizard_poll_type'] = poll_type
-    
+
+    # Динамическое делегирование wizard-логики модулю
+    from src.poll_modules import get_poll_modules
+    poll_modules = get_poll_modules()
+    module = poll_modules.get(poll_type)
+    if module and hasattr(module, 'wizard_create_poll'):
+        # Делегируем создание опроса модулю (например, carpool)
+        return await module.wizard_create_poll(query, context, chat_id)
+
     if poll_type == 'native':
         # Ask about multiple answers
         keyboard = [

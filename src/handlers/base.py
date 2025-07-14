@@ -11,13 +11,24 @@ from src.handlers import dashboard
 from src.decorators import admin_only
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends a welcome message and the chat selection keyboard."""
+    """Sends a welcome message and the chat selection keyboard, или делегирует deep-link модулям."""
     logger.info(f"/start command received in chat {update.effective_chat.id} (type: {update.effective_chat.type})")
-    if update.effective_chat.type == 'private':
+    args = context.args if hasattr(context, 'args') else []
+    if update.effective_chat and update.effective_chat.type == 'private' and args:
+        from src.poll_modules import poll_modules_registry
+        for module in poll_modules_registry.values():
+            if hasattr(module, 'handle_deeplink_start'):
+                handled = await module.handle_deeplink_start(update, context)
+                if handled:
+                    return
+        if update.message:
+            await update.message.reply_text("Неизвестная ссылка или модуль не найден.")
+        return
+    if update.effective_chat and update.effective_chat.type == 'private':
         await dashboard.private_chat_entry_point(update, context)
     else:
-        # If /start is used in a group, just give a brief intro.
-        await update.message.reply_text("Я — бот для опросов. Используйте меня в личном чате для управления.")
+        if update.message:
+            await update.message.reply_text("Я — бот для опросов. Используйте меня в личном чате для управления.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     help_text = (

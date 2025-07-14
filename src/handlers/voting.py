@@ -34,6 +34,47 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
 
         # Regenerate keyboard
         kb = []
+        # --- Модульные кнопки ---
+        poll_type = getattr(poll, 'poll_type', 'native')
+        extra_buttons = []
+        # Импортируем модули registry из bot.py
+        from bot import discover_and_register_modules
+        # Собираем все poll-модули (PollModuleBase)
+        # Для простоты — повторно вызываем discover_and_register_modules, но лучше вынести реестр в bot.py
+        # Здесь для примера:
+        modules = {}
+        def collect_modules():
+            import os, glob, importlib
+            from src.modules.base import PollModuleBase
+            modules_path = "src/modules"
+            for module_name in os.listdir(modules_path):
+                module_dir = os.path.join(modules_path, module_name)
+                if not os.path.isdir(module_dir):
+                    continue
+                py_files = glob.glob(os.path.join(module_dir, "*.py"))
+                for py_file in py_files:
+                    base_name = os.path.basename(py_file)
+                    if base_name == "__init__.py":
+                        continue
+                    mod_name = base_name[:-3]
+                    import_path = f"src.modules.{module_name}.{mod_name}"
+                    try:
+                        module = importlib.import_module(import_path)
+                        for attr in dir(module):
+                            obj = getattr(module, attr)
+                            if isinstance(obj, type) and issubclass(obj, PollModuleBase) and obj is not PollModuleBase:
+                                modules[obj.poll_type] = obj()
+                    except Exception:
+                        pass
+        if not hasattr(context.bot, '_poll_modules'):
+            collect_modules()
+            context.bot._poll_modules = modules
+        else:
+            modules = context.bot._poll_modules
+        module = modules.get(poll_type)
+        if module and hasattr(module, 'get_extra_buttons'):
+            bot_username = (await context.bot.get_me()).username
+            extra_buttons = module.get_extra_buttons(poll.poll_id, bot_username)
         if poll.poll_type == 'native' and poll.options:
             options = poll.options.split(',')
             kb = []

@@ -20,7 +20,36 @@ from telegram import Update
 from src.config import BOT_TOKEN, logger, WEB_URL, DEV_MODE
 from src.database import init_database
 from src.handlers import admin, dashboard, voting, text, results, misc, base, settings
+from src.modules.base import PollModuleBase
+import pkgutil
+from src.poll_modules import poll_modules_registry
+import importlib
+import os
+import glob
 
+def discover_and_register_modules(application):
+    modules_path = "src/modules"
+    for module_name in os.listdir(modules_path):
+        module_dir = os.path.join(modules_path, module_name)
+        if not os.path.isdir(module_dir):
+            continue
+        py_files = glob.glob(os.path.join(module_dir, "*.py"))
+        for py_file in py_files:
+            base_name = os.path.basename(py_file)
+            if base_name == "__init__.py":
+                continue
+            mod_name = base_name[:-3]
+            import_path = f"src.modules.{module_name}.{mod_name}"
+            try:
+                module = importlib.import_module(import_path)
+                for attr in dir(module):
+                    obj = getattr(module, attr)
+                    if isinstance(obj, type) and issubclass(obj, PollModuleBase) and obj is not PollModuleBase:
+                        poll_module = obj()
+                        poll_module.register_handlers(application)
+                        poll_modules_registry[poll_module.poll_type] = poll_module
+            except Exception as e:
+                print(f"Не удалось зарегистрировать {import_path}: {e}")
 
 # --- Web App Registry ---
 BUNDLED_WEB_APPS = {}
@@ -65,6 +94,8 @@ def load_bundled_web_apps():
 
 # --- PTB Application Setup ---
 application = Application.builder().token(BOT_TOKEN).build()
+
+discover_and_register_modules(application)
 
 # Register all handlers
 application.add_handler(TypeHandler(Update, base.track_chats), group=-1)

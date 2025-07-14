@@ -13,8 +13,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles all incoming text messages and routes them based on the user's state.
     """
+    from src.config import logger
+    logger.info(f"[DEBUG] text_handler: update={update}, message={getattr(update, 'message', None)}, text={getattr(getattr(update, 'message', None), 'text', None)}, user_data={dict(context.user_data)}")
     state = context.user_data.get('wizard_state')
     if not state:
+        logger.info(f"[DEBUG] text_handler: return (no wizard_state)")
         return # Not in a wizard, ignore text
 
     logger.info(f"Text handler triggered with state: {state} for user {update.effective_user.id}")
@@ -25,14 +28,32 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Could not delete user message: {e}")
 
+    # --- Модульное делегирование wizard-сценариев ---
+    poll_type = context.user_data.get('wizard_poll_type')
+    if poll_type:
+        from src.poll_modules import get_poll_modules
+        poll_modules = get_poll_modules()
+        module = poll_modules.get(poll_type)
+        if module and hasattr(module, 'wizard_handle_text'):
+            handled = await module.wizard_handle_text(state, update, context)
+            if handled:
+                logger.info(f"[DEBUG] text_handler: return (handled by poll_module)")
+                return
+
     # Route to the appropriate handler
-    if state.startswith('waiting_for_poll_'):
-        await _handle_poll_creation(update, context)
-    elif state == 'waiting_for_poll_setting' or state == 'waiting_for_option_setting':
+    if state == 'waiting_for_poll_setting' or state == 'waiting_for_option_setting':
         await _handle_settings_update(update, context)
+        logger.info(f"[DEBUG] text_handler: return (handled by _handle_settings_update)")
+        return
+    elif state.startswith('waiting_for_poll_'):
+        await _handle_poll_creation(update, context)
+        logger.info(f"[DEBUG] text_handler: return (handled by _handle_poll_creation)")
+        return
     else:
         logger.warning(f"Unhandled wizard state: {state}. Cleaning context.")
         _clean_wizard_context(context)
+        logger.info(f"[DEBUG] text_handler: return (unhandled state)")
+        return
 
 # --- State-specific handlers ---
 
@@ -117,9 +138,10 @@ async def _handle_poll_creation(update: Update, context: ContextTypes.DEFAULT_TY
 
         # Give feedback by updating the message
         # Escape each user-provided option for MarkdownV2 to prevent injection or parsing errors.
-        current_options_text = "\n".join([f"▫️ {escape_markdown(opt, version=2)}" for opt in options])
+        current_options_text = "\n".join([f"\u25ab\ufe0f {escape_markdown(opt)}" for opt in options])
         # Manually escape the dots in the static text parts to avoid Telegram API errors.
-        prompt = fr"{prompt_addition}\n\n*Текущие варианты:*\n{current_options_text}\n\nДобавьте ещё варианты или напишите /done."
+        prompt_addition_escaped = escape_markdown(prompt_addition)
+        prompt = fr"{prompt_addition_escaped}\n\n*{escape_markdown('Текущие варианты:')}*\n{current_options_text}\n\n{escape_markdown('Добавьте ещё варианты или напишите /done.')}"
         await context.bot.edit_message_text(prompt, chat_id=update.effective_chat.id, message_id=message_to_edit, parse_mode='MarkdownV2')
 
 
@@ -132,6 +154,9 @@ async def _handle_settings_update(update: Update, context: ContextTypes.DEFAULT_
     setting_key = app_user_data.get('wizard_setting_key')
     message_id = app_user_data.get('wizard_message_id')
     chat_id = update.effective_chat.id
+
+    from src.config import logger
+    logger.info(f"[DEBUG] _handle_settings_update: poll_id={poll_id}, setting_key={setting_key}, message_id={message_id}, app_user_data={app_user_data}")
 
     if not all([poll_id, setting_key, message_id]):
         logger.error(f"Missing context for settings update: {app_user_data}")
@@ -177,15 +202,25 @@ async def _handle_settings_update(update: Update, context: ContextTypes.DEFAULT_
         elif context.user_data['wizard_state'] == 'waiting_for_poll_setting':
             poll = session.query(db.Poll).filter_by(poll_id=poll_id).first()
             if poll:
+                poll_setting = db.get_poll_setting(poll_id, create=True, session=session)
+                logger.info(f"[DEBUG] BEFORE: poll_id={poll_id} target_sum={getattr(poll_setting, 'target_sum', None)} session_id={id(session)} poll_setting_obj={poll_setting}")
                 if setting_key == 'message':
                     poll.message = text_input
                 elif setting_key == 'options':
                     poll.options = text_input.replace('\n', ',')
                 elif setting_key == 'nudge_negative_emoji':
-                    poll_setting = db.get_poll_setting(poll_id, create=True, session=session)
                     poll_setting.nudge_negative_emoji = text_input
-            
-            session.commit()
+                elif setting_key == 'target_sum':
+                    try:
+                        value = float(text_input.replace(',', '.'))
+                        poll_setting.target_sum = value
+                        logger.info(f"[SET] poll_id={poll_id} target_sum set to {value} session_id={id(session)} poll_setting_obj={poll_setting}")
+                    except ValueError:
+                        poll_setting.target_sum = 0
+                        logger.warning(f"Invalid target_sum: {text_input}")
+            db.safe_commit(session)
+            session.refresh(poll_setting)
+            logger.info(f"[AFTER COMMIT] poll_id={poll_id} target_sum in DB: {poll_setting.target_sum} session_id={id(session)} poll_setting_obj={poll_setting}")
             await settings.show_poll_settings_menu(None, context, poll_id, chat_id=chat_id, message_id=message_id)
 
     except Exception as e:
@@ -196,6 +231,11 @@ async def _handle_settings_update(update: Update, context: ContextTypes.DEFAULT_
         _clean_wizard_context(context)
 
 # --- Utility Functions ---
+
+def escape_markdown(text: str) -> str:
+    """Экранирует все спецсимволы для MarkdownV2."""
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return ''.join(f'\\{c}' if c in escape_chars else c for c in text)
 
 def _clean_wizard_context(context: ContextTypes.DEFAULT_TYPE):
     """Clears all wizard-related keys from user_data."""
