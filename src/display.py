@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 from sqlalchemy.orm import Session
 
 def get_progress_bar(progress, total, length=40):
-    if total <= 0: return "\\[\\]", 0
+    if total <= 0: return "\\[\\] 0%", 0
     percent = progress / total
     filled_length = int(length * percent)
     bar = '|' * filled_length + '.' * (length - filled_length)
@@ -16,7 +16,8 @@ def get_progress_bar(progress, total, length=40):
     from src.handlers.text import escape_markdown
     # Экранируем прогрессбар для MarkdownV2
     bar_escaped = escape_markdown(str(bar))
-    return f"\\[{bar_escaped}\\]", percent * 100
+    percent_display = int(percent * 100)
+    return f"\\[{bar_escaped}\\] {percent_display}%", percent * 100
 
 def generate_poll_content(poll_id: int = None, poll: Optional[db.Poll] = None, session: Optional[Session] = None) -> Tuple[str, Optional[io.BytesIO]]:
     """
@@ -166,8 +167,7 @@ def generate_poll_content(poll_id: int = None, poll: Optional[db.Poll] = None, s
 
             if target_sum > 0:
                 bar, percent = get_progress_bar(total_collected, target_sum)
-                formatted_percent = f"{percent:.1f}".replace('.', '\\.')
-                text_parts.append(f"💰 Собрано: *{int(total_collected)} из {int(target_sum)}* \\({formatted_percent}%\\)\n{bar}")
+                text_parts.append(f"💰 Собрано: *{int(total_collected)} из {int(target_sum)}*\n{bar}")
             elif total_collected > 0:
                 text_parts.append(f"💰 Собрано: *{int(total_collected)}*")
         

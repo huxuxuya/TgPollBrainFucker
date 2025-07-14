@@ -4,6 +4,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 
 import telegram
+import os
 
 from src.database import safe_commit
 
@@ -124,7 +125,7 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
                 poll.photo_file_id = new_msg.photo[-1].file_id if new_msg.photo else None
             elif poll.photo_file_id:
                 # Сообщение уже содержит фото. Если сгенерировано новое изображение —
-                # заменяем медиаконтент, иначе обновляем только подпись.
+                # заменяем медиаконтент, иначе обновляем только подпись или убираем картинку.
                 if new_image:
                     media = InputMediaPhoto(media=new_image, caption=new_caption, parse_mode=ParseMode.MARKDOWN_V2)
                     await context.bot.edit_message_media(
@@ -133,17 +134,17 @@ async def update_poll_message(poll_id: int, context: ContextTypes.DEFAULT_TYPE):
                         media=media,
                         reply_markup=reply_markup,
                     )
-                    # После успешного обновления медиа можно попробовать извлечь file_id,
-                    # но API не возвращает его напрямую. Оставляем прежний, чтобы в
-                    # дальнейшем всё равно пытаться редактировать без пересылки.
                 else:
-                    # Изображение не изменилось — правим только подпись.
-                    await context.bot.edit_message_caption(
+                    # Если image_bytes отсутствует, а раньше была картинка — отправляем пустую картинку
+                    empty_path = os.path.join(os.path.dirname(__file__), '../static/empty.png')
+                    with open(empty_path, 'rb') as f:
+                        empty_image = f.read()
+                    media = InputMediaPhoto(media=empty_image, caption=new_caption, parse_mode=ParseMode.MARKDOWN_V2)
+                    await context.bot.edit_message_media(
                         chat_id=poll.chat_id,
                         message_id=poll.message_id,
-                        caption=new_caption,
+                        media=media,
                         reply_markup=reply_markup,
-                        parse_mode=ParseMode.MARKDOWN_V2,
                     )
             else:
                 # обычное текстовое сообщение
