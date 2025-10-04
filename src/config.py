@@ -19,7 +19,13 @@ if not BOT_TOKEN and not IS_TESTING:
 
 # Get bot owner ID from environment variable. It's better to set it here.
 # The previous logic of setting it on the first use of /backup is fragile.
-BOT_OWNER_ID = int(os.environ.get('BOT_OWNER_ID', 0))
+BOT_OWNER_ID_STR = os.environ.get('BOT_OWNER_ID', '0')
+try:
+    BOT_OWNER_ID = int(BOT_OWNER_ID_STR)
+except ValueError:
+    BOT_OWNER_ID = 0
+    if BOT_OWNER_ID_STR != '0' and BOT_OWNER_ID_STR != 'your_telegram_user_id_here':
+        logger.warning(f'Invalid BOT_OWNER_ID: {BOT_OWNER_ID_STR}, using 0')
 
 # Development mode switch. Set to "true" or "1" for local polling.
 DEV_MODE = os.environ.get('DEV_MODE', 'false').lower() in ('true', '1')

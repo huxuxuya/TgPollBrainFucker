@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  pollbot:
+    build: .
+    volumes:
+      # Данные и конфигурация вне контейнера
+      - db_data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - DEV_MODE=true
+      - DATABASE_URL=sqlite:///app/data/poll_data.db
+      - BOT_TOKEN=${BOT_TOKEN}
+      - BOT_OWNER_ID=${BOT_OWNER_ID}
+    restart: unless-stopped
+    # Health check
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sqlite3; sqlite3.connect('/app/data/poll_data.db')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  db_data:
