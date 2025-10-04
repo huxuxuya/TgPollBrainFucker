@@ -34,6 +34,7 @@ RUN chmod +x /entrypoint.sh
 
 # Установка прав доступа
 RUN chown -R appuser:appuser /app
+RUN chmod o+w /app
 USER appuser
 
 # Переменные окружения
