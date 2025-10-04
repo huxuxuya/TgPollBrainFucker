@@ -525,14 +525,13 @@ def delete_poll_option_settings(poll_id: int):
     finally:
         session.close()
 
-def has_user_created_poll_in_chat(user_id: int, chat_id: int) -> bool:
+def has_user_created_poll_in_chat(session, user_id: int, chat_id: int) -> bool:
     """
     Checks if a given user has ever created a poll in a specific chat.
     This is used as a fallback authorization method for non-visible admins.
     Note: This check assumes that the creator of a poll is the first person who voted.
     A more robust solution would be to add a 'creator_id' to the Polls table.
     """
-    session = SessionLocal()
     try:
         # A user has "created" a poll if they have a response for it.
         # This is an approximation. For a more robust check, a `creator_id`
