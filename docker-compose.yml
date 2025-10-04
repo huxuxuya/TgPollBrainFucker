@@ -4,6 +4,8 @@ services:
   pollbot:
     build: .
     volumes:
+      # Live-reload для кода
+      - .:/app
       # Данные и конфигурация вне контейнера
       - ./data:/app/data
       - ./logs:/app/logs
