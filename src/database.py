@@ -373,6 +373,30 @@ def get_poll_setting(poll_id: int, create: bool = False, session: Optional[Sessi
             else:
                 # If we are in a managed session, just flush to get the ID
                 session.flush()
+        
+        # Если объект найден, загружаем все атрибуты, чтобы избежать DetachedInstanceError
+        if setting and manage_session:
+            # Загружаем все атрибуты объекта в рамках текущей сессии
+            session.refresh(setting)
+            # Создаем копию объекта с загруженными атрибутами
+            setting_data = {
+                'poll_id': setting.poll_id,
+                'allow_multiple_answers': setting.allow_multiple_answers,
+                'show_results_after_vote': setting.show_results_after_vote,
+                'default_show_names': setting.default_show_names,
+                'default_show_count': setting.default_show_count,
+                'show_heatmap': setting.show_heatmap,
+                'show_text_results': setting.show_text_results,
+                'default_names_style': setting.default_names_style,
+                'target_sum': setting.target_sum,
+                'nudge_negative_emoji': setting.nudge_negative_emoji
+            }
+            # Создаем новый объект с загруженными данными
+            detached_setting = PollSetting()
+            for key, value in setting_data.items():
+                setattr(detached_setting, key, value)
+            return detached_setting
+        
         return setting
     finally:
         if manage_session:

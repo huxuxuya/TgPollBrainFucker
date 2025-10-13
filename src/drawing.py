@@ -88,9 +88,44 @@ def _wrap_text(text, font, max_width):
     words = text.split(' ')
     while words:
         line = ''
-        while words and font.getlength(line + words[0]) <= max_width:
-            line += words.pop(0) + ' '
-        lines.append(line.strip())
+        while words:
+            word = words[0]
+            # Проверяем, помещается ли слово в текущую строку
+            test_line = line + word + ' ' if line else word + ' '
+            if font.getlength(test_line) <= max_width:
+                line += words.pop(0) + ' '
+            else:
+                # Если строка пустая и слово не помещается, принудительно обрезаем слово
+                if not line:
+                    # Находим максимальную длину символов, которая помещается в max_width
+                    word_chars = list(word)
+                    truncated_word = ''
+                    for char in word_chars:
+                        test_char = truncated_word + char
+                        if font.getlength(test_char) <= max_width:
+                            truncated_word += char
+                        else:
+                            break
+                    
+                    if truncated_word:
+                        lines.append(truncated_word)
+                        # Обновляем слово, убирая уже добавленную часть
+                        remaining_word = word[len(truncated_word):]
+                        if remaining_word:
+                            words[0] = remaining_word
+                        else:
+                            words.pop(0)
+                    else:
+                        # Если даже один символ не помещается, добавляем пустую строку и пропускаем символ
+                        lines.append('')
+                        words.pop(0)
+                else:
+                    # Строка не пустая, завершаем её
+                    break
+        
+        if line:
+            lines.append(line.strip())
+    
     return lines
 
 def _draw_rounded_rectangle(draw, xy, radius, fill=None, outline=None, width=1, shadow=False):
