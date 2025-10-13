@@ -99,9 +99,11 @@ discover_and_register_modules(application)
 
 # Register all handlers
 application.add_handler(TypeHandler(Update, base.track_chats), group=-1)
+application.add_handler(TypeHandler(Update, base.log_all_updates), group=-1)
 application.add_handler(MessageHandler(filters.ChatType.GROUPS, base.register_user_activity), group=-2)
 application.add_handler(CommandHandler("start", base.start))
 application.add_handler(CommandHandler("help", base.help_command))
+application.add_handler(CommandHandler("debug", base.toggle_debug))
 application.add_handler(CommandHandler("dashboard", dashboard.private_chat_entry_point))
 application.add_handler(CommandHandler("done", text.done_command))
 application.add_handler(CommandHandler("export_json", admin.export_json))

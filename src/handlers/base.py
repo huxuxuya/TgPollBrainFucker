@@ -63,7 +63,7 @@ async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Logs every update received by the bot for debugging purposes."""
-    if context.bot_data.get('debug_mode', False):
+    if context.bot_data.get('debug_mode_enabled', False):
         logger.info(f"[DEBUG_UPDATE]: {update.to_dict()}")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
